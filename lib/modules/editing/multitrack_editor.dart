@@ -1,24 +1,21 @@
-import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
-import 'package:clipnote_audio/modules/file_access/uploader.dart';
-import 'package:clipnote_audio/modules/editing/fft.dart'; // 引入 FFT 與 spectrum100Hz
-import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:audio_waveforms/audio_waveforms.dart';
-
-/*      功能區塊                                      說明
-0  統一播放控制                           一鍵播放 / 暫停所有音軌
-1  混音 PCM                      擷取各音軌的 PCM 資料並進行加總
-2  即時 FFT               每 200ms 擷取當前播放進度進行 FFT 分析
-3   視覺化頻譜  更新 _mixedSpectrum 並傳入 SpectrumBar 顯示跳動
-4    單軌管理                            各軌可個別刪除 / 播放*/
-/// Spectrum 條狀圖 Widget
 import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:audio_waveforms/audio_waveforms.dart';
 import 'package:clipnote_audio/modules/file_access/uploader.dart';
 import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
 import 'package:clipnote_audio/modules/editing/fft.dart';
+
+/*      功能區塊                                      說明
+0  統一播放控制                           一鍵播放 / 暫停所有音軌
+1  混音 PCM                      擷取各音軌的 PCM 資料並進行加總
+2  即時 FFT               每 200ms 擷取當前播放進度進行 FFT 分析
+3   視覺化頻譜  根據每500HZ 一個BIN 顯示跳動
+4    單軌管理                            各軌可個別刪除 / 播放*/
+
+/// Spectrum 條狀圖 Widget
 
 class SpectrumBar extends StatelessWidget {
   final List<double> spectrum;
@@ -109,13 +106,13 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
         final pcm = _pcmData[track.filePath];
         final player = _players[track.filePath];
         if (pcm == null || player == null) continue;
+        if (pcm.length < windowSize) continue;
 
         final posMs = player.position.inMilliseconds;
         final center = (posMs / 1000 * sampleRate).toInt();
-        final start = (center - windowSize ~/ 2).clamp(
-          0,
-          pcm.length - windowSize,
-        );
+        final rawStart = center - windowSize ~/ 2;
+        final maxStart = pcm.length - windowSize;
+        final start = math.max(0, math.min(rawStart, maxStart)).toInt();
         final window = pcm.sublist(start, start + windowSize);
 
         for (int i = 0; i < window.length; i++) {
