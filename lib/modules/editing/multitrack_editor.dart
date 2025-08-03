@@ -16,6 +16,14 @@ import 'package:clipnote_audio/modules/editing/fft.dart';
 4    單軌管理                            各軌可個別刪除 / 播放*/
 
 /// Spectrum 條狀圖 Widget
+import 'dart:async';
+import 'dart:math' as math;
+import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:audio_waveforms/audio_waveforms.dart';
+import 'package:clipnote_audio/modules/file_access/uploader.dart';
+import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
+import 'package:clipnote_audio/modules/editing/fft.dart';
 
 class SpectrumBar extends StatelessWidget {
   final List<double> spectrum;
