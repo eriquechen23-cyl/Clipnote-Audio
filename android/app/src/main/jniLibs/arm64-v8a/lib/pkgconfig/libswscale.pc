@@ -1,0 +1,14 @@
+prefix=/home/jr008/Clipnote-Audio/ffmpeg-src/build/android/arm64-v8a
+exec_prefix=${prefix}
+libdir=/home/jr008/Clipnote-Audio/ffmpeg-src/build/android/arm64-v8a/lib
+includedir=/home/jr008/Clipnote-Audio/ffmpeg-src/build/android/arm64-v8a/include
+
+Name: libswscale
+Description: FFmpeg image rescaling library
+Version: 9.0.100
+Requires: 
+Requires.private: libavutil >= 60.7.100
+Conflicts:
+Libs: -L${libdir}  -lswscale 
+Libs.private: -lm -latomic
+Cflags: -I${includedir}
