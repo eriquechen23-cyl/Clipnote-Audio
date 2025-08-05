@@ -1,0 +1,22 @@
+platform :ios, '12.0'
+
+# Prevent Cocoapods from sending stats
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+require File.expand_path(File.join('..', '..', 'flutter', 'packages', 'flutter_tools', 'bin', 'podhelper'), __FILE__)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  use_modular_headers!
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+  # Include FFmpegKit xcframework
+  pod 'ffmpeg-kit-ios-full', '~> 6.0'
+end
+
+post_install do |installer|
+  flutter_additional_ios_build_settings(installer)
+end

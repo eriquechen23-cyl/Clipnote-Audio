@@ -42,3 +42,20 @@ android {
 flutter {
     source = "../.."
 }
+
+// Copy prebuilt FFmpeg shared libraries into the app's jniLibs
+val jniLibsDir = File(projectDir, "src/main/jniLibs")
+
+tasks.register<Copy>("copyFfmpegArm64") {
+    from(File(rootDir, "ffmpeg-build/arm64-v8a/libffmpeg.so"))
+    into(File(jniLibsDir, "arm64-v8a"))
+}
+
+tasks.register<Copy>("copyFfmpegArmv7") {
+    from(File(rootDir, "ffmpeg-build/armeabi-v7a/libffmpeg.so"))
+    into(File(jniLibsDir, "armeabi-v7a"))
+}
+
+tasks.named("preBuild") {
+    dependsOn("copyFfmpegArm64", "copyFfmpegArmv7")
+}
