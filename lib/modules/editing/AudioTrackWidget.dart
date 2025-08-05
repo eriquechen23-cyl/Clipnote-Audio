@@ -4,15 +4,10 @@ import 'package:flutter/material.dart';
 class AudioTrackWidget extends StatelessWidget {
   final AudioTrack track;
   final VoidCallback onDelete;
-  final VoidCallback onPlayPause;
-  final bool isPlaying;
-
   const AudioTrackWidget({
     super.key,
     required this.track,
     required this.onDelete,
-    required this.onPlayPause,
-    required this.isPlaying,
   });
 
   @override
@@ -25,10 +20,6 @@ class AudioTrackWidget extends StatelessWidget {
           children: [
             const Icon(Icons.music_note),
             const Spacer(),
-            IconButton(
-              icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
-              onPressed: onPlayPause,
-            ),
             IconButton(icon: const Icon(Icons.delete), onPressed: onDelete),
           ],
         ),
