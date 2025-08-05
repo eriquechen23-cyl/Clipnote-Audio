@@ -1,0 +1,8 @@
+name: clipnote_audio_workspace
+packages:
+  - app
+  - native/ffmpeg
+scripts:
+  analyze: melos exec -c 1 -- flutter analyze
+  format: melos exec -c 1 -- flutter format .
+  test: melos exec -c 1 -- flutter test
