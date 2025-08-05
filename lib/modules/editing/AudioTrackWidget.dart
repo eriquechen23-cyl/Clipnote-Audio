@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
 
 /// 音軌編輯元件：只顯示圖示與操作按鈕，不顯示文字資訊
 class AudioTrackWidget extends StatelessWidget {

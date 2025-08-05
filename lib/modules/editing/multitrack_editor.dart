@@ -1,29 +1,13 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:audio_waveforms/audio_waveforms.dart';
-import 'package:clipnote_audio/modules/file_access/uploader.dart';
+import 'package:clipnote_audio/modules/decoding/ffmpeg_decoder.dart';
+import 'package:clipnote_audio/modules/decoding/pcm_player.dart';
 import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
 import 'package:clipnote_audio/modules/editing/fft.dart';
-
-/*      功能區塊                                      說明
-0  統一播放控制                           一鍵播放 / 暫停所有音軌
-1  混音 PCM                      擷取各音軌的 PCM 資料並進行加總
-2  即時 FFT               每 200ms 擷取當前播放進度進行 FFT 分析
-3   視覺化頻譜  根據每500HZ 一個BIN 顯示跳動
-4    單軌管理                            各軌可個別刪除 / 播放*/
-
-/// Spectrum 條狀圖 Widget
-import 'dart:async';
-import 'dart:math' as math;
-import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:audio_waveforms/audio_waveforms.dart';
 import 'package:clipnote_audio/modules/file_access/uploader.dart';
-import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
-import 'package:clipnote_audio/modules/editing/fft.dart';
 
 class SpectrumBar extends StatelessWidget {
   final List<double> spectrum;
@@ -61,7 +45,7 @@ class MultiTrackEditor extends StatefulWidget {
 class _MultiTrackEditorState extends State<MultiTrackEditor> {
   final _uploader = FileUploader();
   final Map<String, List<double>> _pcmData = {};
-  final Map<String, AudioPlayer> _players = {};
+  final Map<String, PcmPlayer> _players = {};
   final List<AudioTrack> _tracks = [];
   bool _isPlayingAll = false;
   List<double> _mixedSpectrum = [];
@@ -76,25 +60,19 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
     super.dispose();
   }
 
-  Future<List<double>> extractPcm(String filePath) async {
-    final controller = PlayerController();
-    await controller.preparePlayer(
-      path: filePath,
-      shouldExtractWaveform: true,
-      noOfSamples: 8192,
-    );
-    return controller.waveformData ?? [];
-  }
-
   Future<void> _addTrack() async {
     final paths = await _uploader.pickAudioFiles();
     if (paths.isNotEmpty) {
+      final decoder = FFmpegDecoder();
       for (final path in paths) {
-        final pcm = await extractPcm(path);
-        final player = AudioPlayer();
-        await player.setFilePath(path);
+        final pcmData = decoder.decode(path);
+        final player = PcmPlayer();
+        await player.load(pcmData.buffer, pcmData.sampleRate);
 
-        _pcmData[path] = pcm;
+        final samples = Int16List.view(pcmData.buffer.buffer)
+            .map((s) => s.toDouble())
+            .toList();
+        _pcmData[path] = samples;
         _players[path] = player;
         _tracks.add(AudioTrack(path));
       }

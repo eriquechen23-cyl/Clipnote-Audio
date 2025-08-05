@@ -6,7 +6,8 @@ import 'dart:math';
 import 'package:clipnote_audio/modules/editing/fft/fft.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
+import '../decoding/ffmpeg_decoder.dart';
+import '../decoding/pcm_player.dart';
 import '../file_access/uploader.dart';
 import 'fft/fft_util.dart'; // 新的 FFT 實作：包含 fftSize 常數與 getFftBins()
 
@@ -20,7 +21,7 @@ class SingleTrack extends StatefulWidget {
 
 /// State 類型公開，方便外部使用 GlobalKey 控制播放
 class SingleTrackState extends State<SingleTrack> {
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  final PcmPlayer _player = PcmPlayer();
   String? _filePath;
   List<double> _spectrumData = List.filled(fftSize, 0);
   Timer? _spectrumTimer;
@@ -28,20 +29,20 @@ class SingleTrackState extends State<SingleTrack> {
   @override
   void dispose() {
     _spectrumTimer?.cancel();
-    _audioPlayer.dispose();
+    _player.dispose();
     super.dispose();
   }
 
   /// 切換播放 / 暫停
   Future<void> togglePlayPause() async {
-    if (_audioPlayer.playing) {
-      await _audioPlayer.pause();
+    if (_player.playing) {
+      await _player.pause();
       _spectrumTimer?.cancel();
     } else {
       if (_filePath == null) {
         await _selectAndPlay();
       } else {
-        await _audioPlayer.play();
+        await _player.play();
         _startSpectrum();
       }
     }
@@ -52,8 +53,9 @@ class SingleTrackState extends State<SingleTrack> {
     final path = await FileUploader().pickAudioFile();
     if (path == null) return;
     _filePath = path;
-    await _audioPlayer.setFilePath(path);
-    await _audioPlayer.play();
+    final pcm = FFmpegDecoder().decode(path);
+    await _player.load(pcm.buffer, pcm.sampleRate);
+    await _player.play();
     _startSpectrum();
     setState(() {});
   }
@@ -63,12 +65,12 @@ class SingleTrackState extends State<SingleTrack> {
     _spectrumTimer = Timer.periodic(const Duration(milliseconds: 100), (
       _,
     ) async {
-      if (!_audioPlayer.playing || _filePath == null) return;
+      if (!_player.playing || _filePath == null) return;
 
       // 1) 從檔案讀取 fftSize 長度的 PCM samples
       final samples = await FFTUtil.getSamples(
         filePath: _filePath!,
-        position: _audioPlayer.position,
+        position: _player.position,
         sampleCount: fftSize,
       );
       // 2) 用新的 FFT 實作計算每個 bin 的振幅
@@ -95,7 +97,7 @@ class SingleTrackState extends State<SingleTrack> {
                   : '未選擇音檔',
             ),
             trailing: IconButton(
-              icon: Icon(_audioPlayer.playing ? Icons.pause : Icons.play_arrow),
+              icon: Icon(_player.playing ? Icons.pause : Icons.play_arrow),
               onPressed: togglePlayPause,
             ),
           ),
