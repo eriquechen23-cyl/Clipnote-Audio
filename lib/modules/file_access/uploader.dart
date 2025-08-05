@@ -25,4 +25,12 @@ class FileUploader {
       return [];
     }
   }
+
+  /// 選取單一音檔並回傳其路徑。
+  /// 如果使用者未選取任何檔案則回傳 null。
+  Future<String?> pickAudioFile() async {
+    final files = await pickAudioFiles();
+    if (files.isEmpty) return null;
+    return files.first;
+  }
 }
