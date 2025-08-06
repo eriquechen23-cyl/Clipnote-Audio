@@ -9,7 +9,9 @@ import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
 import 'package:clipnote_audio/modules/editing/fft/fft.dart';
 import 'package:clipnote_audio/modules/editing/fft/fft_util.dart';
 import 'package:clipnote_audio/modules/file_access/uploader.dart';
+import 'package:clipnote_audio/modules/merge_mix/merger.dart';
 import 'package:clipnote_audio/modules/merge_mix/mix_bus.dart';
+import 'package:file_picker/file_picker.dart';
 
 class SpectrumBar extends StatelessWidget {
   final List<double> spectrum;
@@ -112,6 +114,26 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
     setState(() {});
   }
 
+  Future<void> _exportMix() async {
+    if (_tracks.isEmpty) return;
+    final outputPath = await FilePicker.platform.saveFile(
+      dialogTitle: '選擇導出位置',
+      fileName: 'mix.wav',
+    );
+    if (outputPath == null) return;
+    try {
+      await Merger.merge(
+          _tracks.map((t) => t.filePath).toList(), outputPath);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('導出成功')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('導出失敗: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -167,6 +189,12 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
                 icon: const Icon(Icons.add),
                 label: const Text("新增音軌"),
                 onPressed: _addTrack,
+              ),
+              const SizedBox(width: 12),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.download),
+                label: const Text("導出"),
+                onPressed: _tracks.isEmpty ? null : _exportMix,
               ),
             ],
           ),
