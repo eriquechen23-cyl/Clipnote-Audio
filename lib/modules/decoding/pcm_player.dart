@@ -2,6 +2,8 @@ import 'dart:ffi';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
+import 'native_library.dart';
+
 /// FFI wrapper around a platform specific PCM audio player.
 class PcmPlayer {
   final DynamicLibrary _lib;
@@ -16,7 +18,7 @@ class PcmPlayer {
   bool _playing = false;
 
   PcmPlayer({DynamicLibrary? library})
-      : _lib = library ?? DynamicLibrary.open('libaudioplayer.so') {
+      : _lib = library ?? loadNativeLibrary('audioplayer') {
     _create = _lib.lookupFunction<_CreateNative, _Create>('player_create');
     _dispose = _lib.lookupFunction<_DisposeNative, _Dispose>('player_dispose');
     _load = _lib.lookupFunction<_LoadNative, _Load>('player_load');

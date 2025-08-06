@@ -2,6 +2,8 @@ import 'dart:ffi';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
+import 'native_library.dart';
+
 /// Holds decoded PCM data along with metadata like sample rate.
 class PcmData {
   final Uint8List buffer;
@@ -16,7 +18,7 @@ class FFmpegDecoder {
   late final _Free _free;
 
   FFmpegDecoder({DynamicLibrary? library})
-      : _lib = library ?? DynamicLibrary.open('libffmpeg.so') {
+      : _lib = library ?? loadNativeLibrary('ffmpeg') {
     _decode =
         _lib.lookupFunction<_DecodeNative, _Decode>('decode_audio');
     _free = _lib.lookupFunction<_FreeNative, _Free>('free_buffer');
