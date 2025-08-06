@@ -1,7 +1,10 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-/// MixBus 接受多條 PCM 音軌，於時間軸上對齊並加總產生混音結果。
+import 'package:clipnote_audio/modules/editing/audio_track.dart';
+import 'package:clipnote_audio/modules/editing/segment.dart';
+
+/// MixBus 接受多條 PCM 音軌，依時間軸與淡入淡出設定混音。
 class MixBus {
   final int sampleRate;
   final Map<String, _Track> _tracks = {};
@@ -9,19 +12,25 @@ class MixBus {
 
   MixBus(this.sampleRate);
 
-  /// 加入音軌資料 [pcm]，可指定起始位移 [offsetSamples]（單位：樣本）。
-  void addTrack(String id, Uint8List pcm, {int offsetSamples = 0}) {
-    _tracks[id] = _Track(Int16List.view(pcm.buffer), offsetSamples);
+  void addTrack(AudioTrack track) {
+    _tracks[track.filePath] =
+        _Track(track.samples, List<AudioSegment>.from(track.segments));
     _cache = null;
   }
 
-  /// 移除音軌
+  void updateTrack(AudioTrack track) {
+    final t = _tracks[track.filePath];
+    if (t != null) {
+      t.segments = List<AudioSegment>.from(track.segments);
+      _cache = null;
+    }
+  }
+
   void removeTrack(String id) {
     _tracks.remove(id);
     _cache = null;
   }
 
-  /// 取得混音後的 PCM 資料。
   Uint8List get output {
     _cache ??= _mix();
     return _cache!;
@@ -30,12 +39,24 @@ class MixBus {
   Uint8List _mix() {
     int length = 0;
     for (final t in _tracks.values) {
-      length = math.max(length, t.offset + t.samples.length);
+      for (final seg in t.segments) {
+        length = math.max(length, seg.start + seg.duration);
+      }
     }
     final mix32 = Int32List(length);
     for (final t in _tracks.values) {
-      for (int i = 0; i < t.samples.length; i++) {
-        mix32[t.offset + i] += t.samples[i];
+      for (final seg in t.segments) {
+        final maxDur = math.min(seg.duration,
+            t.samples.length - seg.sourceStart);
+        for (int i = 0; i < maxDur; i++) {
+          double sample = t.samples[seg.sourceStart + i].toDouble();
+          if (seg.fadeIn > 0 && i < seg.fadeIn) {
+            sample *= i / seg.fadeIn;
+          } else if (seg.fadeOut > 0 && i >= seg.duration - seg.fadeOut) {
+            sample *= (seg.duration - i) / seg.fadeOut;
+          }
+          mix32[seg.start + i] += sample.toInt();
+        }
       }
     }
     final out16 = Int16List(length);
@@ -51,7 +72,6 @@ class MixBus {
 
 class _Track {
   final Int16List samples;
-  final int offset;
-  _Track(this.samples, this.offset);
+  List<AudioSegment> segments;
+  _Track(this.samples, this.segments);
 }
-

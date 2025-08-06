@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -6,11 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:clipnote_audio/modules/decoding/ffmpeg_decoder.dart';
 import 'package:clipnote_audio/modules/decoding/pcm_player.dart';
 import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
+import 'package:clipnote_audio/modules/editing/audio_track.dart';
 import 'package:clipnote_audio/modules/editing/fft/fft.dart';
 import 'package:clipnote_audio/modules/editing/fft/fft_util.dart';
 import 'package:clipnote_audio/modules/file_access/uploader.dart';
-import 'package:clipnote_audio/modules/merge_mix/merger.dart';
 import 'package:clipnote_audio/modules/merge_mix/mix_bus.dart';
+import 'package:clipnote_audio/modules/widget/timeline/ruler.dart';
 import 'package:file_picker/file_picker.dart';
 
 class SpectrumBar extends StatelessWidget {
@@ -68,9 +71,11 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
       final decoder = FFmpegDecoder();
       for (final path in paths) {
         final pcmData = decoder.decode(path);
+        final samples = Int16List.view(pcmData.buffer.buffer);
         _mixBus ??= MixBus(pcmData.sampleRate);
-        _mixBus!.addTrack(path, pcmData.buffer);
-        _tracks.add(AudioTrack(path));
+        final track = AudioTrack(path, samples, pcmData.sampleRate);
+        _mixBus!.addTrack(track);
+        _tracks.add(track);
       }
       await _reloadPlayer();
       _startMixerLoop();
@@ -115,23 +120,56 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
   }
 
   Future<void> _exportMix() async {
-    if (_tracks.isEmpty) return;
+    if (_tracks.isEmpty || _mixBus == null) return;
     final outputPath = await FilePicker.platform.saveFile(
       dialogTitle: '選擇導出位置',
       fileName: 'mix.wav',
     );
     if (outputPath == null) return;
     try {
-      await Merger.merge(
-          _tracks.map((t) => t.filePath).toList(), outputPath);
+      final bytes = _buildWav(_mixBus!.output, _mixBus!.sampleRate);
+      await File(outputPath).writeAsBytes(bytes);
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('導出成功')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('導出失敗: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('導出失敗: $e')));
     }
+  }
+
+  List<int> _buildWav(Uint8List pcm, int sampleRate) {
+    final byteRate = sampleRate * 2;
+    final blockAlign = 2;
+    final builder = BytesBuilder();
+    builder.add(ascii.encode('RIFF'));
+    builder.add(_int32(pcm.length + 36));
+    builder.add(ascii.encode('WAVE'));
+    builder.add(ascii.encode('fmt '));
+    builder.add(_int32(16));
+    builder.add(_int16(1));
+    builder.add(_int16(1));
+    builder.add(_int32(sampleRate));
+    builder.add(_int32(byteRate));
+    builder.add(_int16(blockAlign));
+    builder.add(_int16(16));
+    builder.add(ascii.encode('data'));
+    builder.add(_int32(pcm.length));
+    builder.add(pcm);
+    return builder.toBytes();
+  }
+
+  Uint8List _int16(int value) {
+    final b = ByteData(2);
+    b.setInt16(0, value, Endian.little);
+    return b.buffer.asUint8List();
+  }
+
+  Uint8List _int32(int value) {
+    final b = ByteData(4);
+    b.setInt32(0, value, Endian.little);
+    return b.buffer.asUint8List();
   }
 
   @override
@@ -155,6 +193,8 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
             padding: const EdgeInsets.only(top: 8, left: 12, right: 12),
             child: SpectrumBar(spectrum: _mixedSpectrum, height: 100),
           ),
+        const SizedBox(height: 8),
+        const TimelineRuler(),
         // 音軌列表
         Expanded(
           child: ListView.builder(
@@ -166,6 +206,11 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
                 onDelete: () async {
                   _mixBus?.removeTrack(track.filePath);
                   _tracks.removeAt(i);
+                  await _reloadPlayer();
+                  setState(() {});
+                },
+                onChanged: () async {
+                  _mixBus?.updateTrack(track);
                   await _reloadPlayer();
                   setState(() {});
                 },
