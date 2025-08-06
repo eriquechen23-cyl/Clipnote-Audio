@@ -1,24 +1,62 @@
 # Clipnote Audio
 
-Clipnote Audio is a Flutter-based multi-track audio editor that allows you to mix, analyze, and visualize audio in real time.
+![Clipnote Audio Logo](docs/images/logo.svg)
 
-Clipnote Audio 是一款基於 Flutter 的多軌音訊編輯器，可用於即時混音、分析與視覺化音訊。
+Clipnote Audio is a Flutter-based multi-track audio editor that uses native FFmpeg decoding and a custom PCM player via FFI. It
+supports real-time mixing, spectrum analysis, and waveform editing on multiple tracks.
+
+Clipnote Audio 是一款基於 Flutter 的多軌音訊編輯器，透過 FFI 呼叫原生 FFmpeg 解碼與自製 PCM 播放器，支援即時混音、頻譜分析與多軌
+編輯。
 
 ## Features / 功能
 
-- Unified playback control for all tracks / 所有音軌一鍵播放與暫停
-- PCM mixing across tracks / 各音軌的 PCM 混音
-- Real-time FFT analysis (200 ms interval) / 即時 FFT（每 200 毫秒分析一次）
-- 500 Hz spectrum visualization / 500 Hz 頻段的視覺化頻譜
-- Per-track management (delete or play individually) / 單軌管理（刪除與播放控制）
-- Reverb and volume adjustment modules / 混響與音量調整模組
-- File uploader for adding audio files / 檔案上傳器，可新增音訊檔
-- Merge & mix utilities for output / 合併與混音工具，可輸出音訊
+- Import MP3/M4A/WAV/AAC files with the built-in file picker / 透過檔案選取器匯入 MP3、M4A、WAV、AAC 音訊
+- Drag tracks on the timeline, long‑press to trim segments / 在時間軸上拖曳音軌並長按剪裁區段
+- Adjustable per‑segment fade in/out / 每段音訊可調整淡入淡出
+- Unified play/pause preview and real‑time spectrum analysis (200 ms FFT) / 統一播放/暫停預覽並每 200 毫秒進行 FFT 頻譜分析
+- Mix down multiple tracks and export the result as a 16‑bit WAV file / 將多軌混音並匯出為 16 位元 WAV
+- FFI wrappers for FFmpeg decoding and a native PCM audio player / 使用 FFI 包裝 FFmpeg 解碼與原生 PCM 播放器
+- Timeline ruler and per‑track delete controls / 具時間尺標與單軌刪除控制
+- Placeholder modules for reverb and volume adjustment / 提供混響與音量調整模組骨架
 
-## Usage / 使用方式
+## Project Structure / 專案結構
 
-1. Install Flutter and its dependencies.
-2. Run `flutter pub get` to install packages.
-3. Run `flutter run` to launch the application.
-4. Use the **新增音軌** button to add tracks and explore mixing and visualization.
+```
+lib/
+  main.dart                // App entry, loads MultiTrackEditor
+  modules/
+    decoding/              // FFmpeg decoder & PCM player FFI
+    editing/               // Track, segment, and editor widgets
+    file_access/           // File picker utilities
+    merge_mix/             // MixBus for combining tracks
+    volume/, effects/      // Effect placeholders
+```
 
+## Getting Started / 使用方式
+
+### Prerequisites / 事前準備
+
+- Install the Flutter SDK (3.x or later).
+- Build native libraries `libffmpeg` and `libaudioplayer` for your target platform. An Android build script is provided in `build_ffmpeg.sh`.
+
+安裝 Flutter SDK（建議 3.x 以上）；並為目標平台編譯 `libffmpeg` 與 `libaudioplayer` 原生函式庫，可參考 `build_ffmpeg.sh` 的 Android 範例。
+
+### Setup / 設定步驟
+
+1. `flutter pub get`
+2. `flutter run`
+
+或在桌面／行動裝置上使用 `flutter run` 啟動應用程式。
+
+### Testing / 測試
+
+Run `flutter test` to execute widget tests.
+
+執行 `flutter test` 以執行元件測試。
+
+## License / 授權
+
+This project is licensed under the BSD 3-Clause License.
+See [LICENSE](LICENSE) for the official English text and [LICENSE.zh](LICENSE.zh) for a Chinese translation.
+
+本專案以 BSD 3-Clause 授權，詳見 [LICENSE](LICENSE)（英文）與 [LICENSE.zh](LICENSE.zh)（中文翻譯）。
