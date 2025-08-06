@@ -130,12 +130,14 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
       final bytes = _buildWav(_mixBus!.output, _mixBus!.sampleRate);
       await File(outputPath).writeAsBytes(bytes);
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('導出成功')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('導出成功')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('導出失敗: $e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('導出失敗: $e')));
     }
   }
 
