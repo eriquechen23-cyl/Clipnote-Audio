@@ -6,7 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:clipnote_audio/modules/decoding/ffmpeg_decoder.dart';
 import 'package:clipnote_audio/modules/decoding/pcm_player.dart';
 import 'package:clipnote_audio/modules/editing/AudioTrackWidget.dart';
-import 'package:clipnote_audio/modules/editing/fft.dart';
+import 'package:clipnote_audio/modules/editing/fft/fft.dart';
+import 'package:clipnote_audio/modules/editing/fft/fft_util.dart';
 import 'package:clipnote_audio/modules/file_access/uploader.dart';
 import 'package:clipnote_audio/modules/merge_mix/mix_bus.dart';
 
@@ -77,19 +78,19 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
 
   void _startMixerLoop() {
     _mixerTimer?.cancel();
-    _mixerTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+    _mixerTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
       if (_mixBus == null || _player == null) return;
-      const windowSize = 1024;
       final samples = Int16List.view(_mixBus!.output.buffer);
-      if (samples.length < windowSize) return;
+      if (samples.length < fftSize) return;
       final posMs = _player!.position.inMilliseconds;
       final center = (posMs / 1000 * _mixBus!.sampleRate).toInt();
-      final rawStart = center - windowSize ~/ 2;
-      final maxStart = samples.length - windowSize;
-      final start = math.max(0, math.min(rawStart, maxStart));
-      final window =
-          samples.sublist(start, start + windowSize).map((s) => s.toDouble()).toList();
-      final bins = spectrum500Hz(window, _mixBus!.sampleRate.toDouble());
+      final rawStart = center - fftSize ~/ 2;
+      final start = math.max(0, math.min(rawStart, samples.length - fftSize));
+      final window = samples
+          .sublist(start, start + fftSize)
+          .map((s) => s.toDouble())
+          .toList();
+      final bins = await FFTUtil.computeSpectrum(samples: window);
       setState(() => _mixedSpectrum = bins);
     });
   }

@@ -21,7 +21,8 @@ class Complex {
 /// Cooley–Tukey FFT 實作 (遞迴版)
 List<Complex> fft(List<Complex> x) {
   final n = x.length;
-  assert(n == fftSize, 'FFT input length must be $fftSize');
+  // FFT 長度必須為 2 的次方，遞迴運算會持續切分
+  assert((n & (n - 1)) == 0, 'FFT length must be power of two');
   if (n <= 1) return x;
 
   // 分離偶數與奇數項

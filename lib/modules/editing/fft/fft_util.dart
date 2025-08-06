@@ -1,7 +1,7 @@
 // lib/modules/editing/fft_util.dart
 
 import 'dart:async';
-import 'fft.dart'; // 你的 getFftBins, fftSize
+import 'fft.dart'; // 提供 fftSize 與 getFftBins
 import 'package:audio_waveforms/audio_waveforms.dart';
 
 /// 音訊 FFT 工具：改用 audio_waveforms Plugin
@@ -17,12 +17,12 @@ class FFTUtil {
   }
 
   /// 從 audio_waveforms 取得固定數量的 waveform samples
-  /// 這裡不再使用 position（全檔案等距取樣），若要精細定位可再 slice
+  /// 目前忽略 position，取得等距抽樣資料
   static Future<List<double>> getSamples({
     required String filePath,
-    required Duration position, // 目前未使用，可保留呼叫相容性
-    required int sampleCount, // 通常等於 fftSize
+    required Duration position,
   }) async {
+    const sampleCount = fftSize;
     final cacheKey = '$filePath#$sampleCount';
     if (_waveformCache.containsKey(cacheKey)) {
       return _waveformCache[cacheKey]!;
@@ -46,17 +46,17 @@ class FFTUtil {
   }
 
   /// 直接取得 FFT 振幅 bins
+  /// [filePath] 與 [samples] 至少需提供一種來源
   static Future<List<double>> computeSpectrum({
-    required String filePath,
-    required Duration position,
-    required int sampleCount,
+    String? filePath,
+    List<double>? samples,
+    Duration position = Duration.zero,
   }) async {
-    final samples = await getSamples(
-      filePath: filePath,
-      position: position,
-      sampleCount: sampleCount,
-    );
-    // 將 waveform samples（已經是振幅或歸一化值）丟進頻譜計算
-    return getFftBins(samples);
+    final data = samples ??
+        await getSamples(
+          filePath: filePath!,
+          position: position,
+        );
+    return getFftBins(data);
   }
 }

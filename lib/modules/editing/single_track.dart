@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import '../decoding/ffmpeg_decoder.dart';
 import '../decoding/pcm_player.dart';
 import '../file_access/uploader.dart';
-import 'fft/fft_util.dart'; // 新的 FFT 實作：包含 fftSize 常數與 getFftBins()
+import 'fft/fft_util.dart'; // 使用 FFTUtil 計算頻譜
 
 /// 單軌播放與即時頻譜元件
 class SingleTrack extends StatefulWidget {
@@ -62,20 +62,12 @@ class SingleTrackState extends State<SingleTrack> {
 
   void _startSpectrum() {
     _spectrumTimer?.cancel();
-    _spectrumTimer = Timer.periodic(const Duration(milliseconds: 100), (
-      _,
-    ) async {
+    _spectrumTimer = Timer.periodic(const Duration(milliseconds: 100), (_) async {
       if (!_player.playing || _filePath == null) return;
-
-      // 1) 從檔案讀取 fftSize 長度的 PCM samples
-      final samples = await FFTUtil.getSamples(
+      final bins = await FFTUtil.computeSpectrum(
         filePath: _filePath!,
         position: _player.position,
-        sampleCount: fftSize,
       );
-      // 2) 用新的 FFT 實作計算每個 bin 的振幅
-      final bins = getFftBins(samples);
-
       setState(() {
         _spectrumData = bins;
       });
