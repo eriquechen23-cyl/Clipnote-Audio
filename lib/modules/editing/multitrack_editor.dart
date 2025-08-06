@@ -197,28 +197,44 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
           ),
         const SizedBox(height: 8),
         const TimelineRuler(),
-        // 音軌列表
+        // 音軌列表或選檔提示
         Expanded(
-          child: ListView.builder(
-            itemCount: _tracks.length,
-            itemBuilder: (_, i) {
-              final track = _tracks[i];
-              return AudioTrackWidget(
-                track: track,
-                onDelete: () async {
-                  _mixBus?.removeTrack(track.filePath);
-                  _tracks.removeAt(i);
-                  await _reloadPlayer();
-                  setState(() {});
-                },
-                onChanged: () async {
-                  _mixBus?.updateTrack(track);
-                  await _reloadPlayer();
-                  setState(() {});
-                },
-              );
-            },
-          ),
+          child: _tracks.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.library_music,
+                          size: 80, color: Colors.grey),
+                      const SizedBox(height: 16),
+                      ElevatedButton.icon(
+                        icon: const Icon(Icons.file_open),
+                        label: const Text('選擇音檔'),
+                        onPressed: _addTrack,
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: _tracks.length,
+                  itemBuilder: (_, i) {
+                    final track = _tracks[i];
+                    return AudioTrackWidget(
+                      track: track,
+                      onDelete: () async {
+                        _mixBus?.removeTrack(track.filePath);
+                        _tracks.removeAt(i);
+                        await _reloadPlayer();
+                        setState(() {});
+                      },
+                      onChanged: () async {
+                        _mixBus?.updateTrack(track);
+                        await _reloadPlayer();
+                        setState(() {});
+                      },
+                    );
+                  },
+                ),
         ),
         // 控制列
         Padding(
@@ -229,7 +245,7 @@ class _MultiTrackEditorState extends State<MultiTrackEditor> {
               ElevatedButton.icon(
                 icon: Icon(_isPlayingAll ? Icons.pause : Icons.play_arrow),
                 label: Text(_isPlayingAll ? "暫停所有" : "播放所有"),
-                onPressed: _toggleAllPlayPause,
+                onPressed: _tracks.isEmpty ? null : _toggleAllPlayPause,
               ),
               const SizedBox(width: 12),
               ElevatedButton.icon(
