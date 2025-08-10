@@ -1,74 +1,92 @@
-import 'dart:ffi';
+import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
-import 'package:ffi/ffi.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
 
-import 'native_library.dart';
-
-/// FFI wrapper around a platform specific PCM audio player.
 class PcmPlayer {
-  final DynamicLibrary _lib;
-  late final _Create _create;
-  late final _Dispose _dispose;
-  late final _Load _load;
-  late final _Play _play;
-  late final _Pause _pause;
-  late final _Position _position;
+  final AudioPlayer _player = AudioPlayer();
+  String? _tmpWavPath;
 
-  late final int _handle;
-  bool _playing = false;
+  Future<void> load(Uint8List pcm, int sampleRate, {int channels = 1}) async {
+    if (pcm.isEmpty) {
+      throw 'Audio source error: PCM is empty';
+    }
 
-  PcmPlayer({DynamicLibrary? library})
-      : _lib = library ?? loadNativeLibrary('audioplayer') {
-    _create = _lib.lookupFunction<_CreateNative, _Create>('player_create');
-    _dispose = _lib.lookupFunction<_DisposeNative, _Dispose>('player_dispose');
-    _load = _lib.lookupFunction<_LoadNative, _Load>('player_load');
-    _play = _lib.lookupFunction<_PlayNative, _Play>('player_play');
-    _pause = _lib.lookupFunction<_PauseNative, _Pause>('player_pause');
-    _position =
-        _lib.lookupFunction<_PositionNative, _Position>('player_position');
-    _handle = _create();
+    final wavBytes = _wrapAsWavS16(pcm, sampleRate, channels: channels);
+
+    final dir = await getTemporaryDirectory();
+    final f = File(
+      '${dir.path}/mix_${DateTime.now().millisecondsSinceEpoch}.wav',
+    );
+    await f.writeAsBytes(wavBytes, flush: true);
+    _tmpWavPath = f.path;
+
+    try {
+      await _player.setFilePath(_tmpWavPath!);
+    } on PlayerException catch (e) {
+      // e.code 通常是 "Source error"
+      throw 'Audio source error: ${e.code} — ${e.message}';
+    } on PlayerInterruptedException catch (e) {
+      throw 'Audio interrupted: ${e.message}';
+    } catch (e) {
+      throw 'Audio load failed: $e';
+    }
   }
 
-  Future<void> load(Uint8List pcm, int sampleRate) async {
-    final ptr = calloc<Uint8>(pcm.length);
-    ptr.asTypedList(pcm.length).setAll(0, pcm);
-    _load(_handle, ptr, pcm.length, sampleRate);
-    calloc.free(ptr);
-  }
+  Future<void> play() => _player.play();
+  Future<void> pause() => _player.pause();
 
-  Future<void> play() async {
-    _play(_handle);
-    _playing = true;
-  }
-
-  Future<void> pause() async {
-    _pause(_handle);
-    _playing = false;
-  }
-
-  Duration get position => Duration(milliseconds: _position(_handle));
-  bool get playing => _playing;
+  Duration get position => _player.position;
+  bool get playing => _player.playing;
 
   Future<void> dispose() async {
-    _dispose(_handle);
+    await _player.dispose();
+    if (_tmpWavPath != null) {
+      // 可選：清掉暫存檔
+      try {
+        File(_tmpWavPath!).deleteSync();
+      } catch (_) {}
+    }
+  }
+
+  // === Helpers ===
+  Uint8List _wrapAsWavS16(Uint8List pcm, int sampleRate, {int channels = 1}) {
+    final bits = 16;
+    final blockAlign = channels * (bits ~/ 8); // 每樣本 bytes
+    final byteRate = sampleRate * blockAlign; // 每秒 bytes
+    final dataLen = pcm.length;
+    final riffSize = 36 + dataLen;
+
+    final bb = BytesBuilder();
+
+    Uint8List _ascii(String s) =>
+        Uint8List.fromList(s.codeUnits.map((c) => math.min(c, 0xFF)).toList());
+    Uint8List _u16(int v) {
+      final b = ByteData(2)..setUint16(0, v, Endian.little);
+      return b.buffer.asUint8List();
+    }
+
+    Uint8List _u32(int v) {
+      final b = ByteData(4)..setUint32(0, v, Endian.little);
+      return b.buffer.asUint8List();
+    }
+
+    bb.add(_ascii('RIFF'));
+    bb.add(_u32(riffSize));
+    bb.add(_ascii('WAVE'));
+    bb.add(_ascii('fmt '));
+    bb.add(_u32(16)); // Subchunk1Size (PCM)
+    bb.add(_u16(1)); // AudioFormat = PCM
+    bb.add(_u16(channels)); // NumChannels
+    bb.add(_u32(sampleRate)); // SampleRate
+    bb.add(_u32(byteRate)); // ByteRate
+    bb.add(_u16(blockAlign)); // BlockAlign
+    bb.add(_u16(bits)); // BitsPerSample
+    bb.add(_ascii('data'));
+    bb.add(_u32(dataLen));
+    bb.add(pcm);
+
+    return bb.toBytes();
   }
 }
-
-typedef _CreateNative = Int32 Function();
-typedef _Create = int Function();
-
-typedef _DisposeNative = Void Function(Int32);
-typedef _Dispose = void Function(int);
-
-typedef _LoadNative = Void Function(
-    Int32, Pointer<Uint8>, Int32, Int32);
-typedef _Load = void Function(int, Pointer<Uint8>, int, int);
-
-typedef _PlayNative = Void Function(Int32);
-typedef _Play = void Function(int);
-
-typedef _PauseNative = Void Function(Int32);
-typedef _Pause = void Function(int);
-
-typedef _PositionNative = Int64 Function(Int32);
-typedef _Position = int Function(int);

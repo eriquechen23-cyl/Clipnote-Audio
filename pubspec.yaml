@@ -13,6 +13,13 @@ dependencies:
   audio_waveforms: ^1.3.0
   linked_scroll_controller: ^0.2.0
   ffi: ^2.1.0
+  path_provider: ^2.1.4
+  path: ^1.9.0
+  ffmpeg_kit_flutter_new: ^3.1.0
+  just_audio: ^0.9.39
+  flutter_native_splash: ^2.4.6
+  flutter_launcher_icons: ^0.14.4
+
 
 
 dev_dependencies:
@@ -22,3 +29,30 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - lib/assets/
+
+flutter_native_splash:
+  # iOS + Android 11↓ 可以用全螢幕背景圖
+  background_image: lib/assets/loading.jpg
+  background_image_dark: lib/assets/loading.jpg
+  color: "#0A0F1C"
+  color_dark: "#0A0F1C"
+
+  # Android 12+：不要放 image，只留背景色（避免置中圖閃一下）
+  android_12:
+    color: "#0A0F1C"
+    color_dark: "#0A0F1C"
+    # 不要設 image
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+
+  # 基本圖示（建議 1024x1024 PNG）
+  image_path: lib/assets/logo2.png
+
+  # Android 13+ 自適應圖示（前景/背景/單色）
+  adaptive_icon_foreground: lib/assets/logo2.png
+  adaptive_icon_background: "#0A0F1C"      # 你的品牌底色，或放張背景圖
+  adaptive_icon_monochrome: lib/assets/logo2.png

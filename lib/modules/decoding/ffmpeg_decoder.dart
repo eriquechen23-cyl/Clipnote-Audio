@@ -1,55 +1,51 @@
-import 'dart:ffi';
+// lib/modules/decoding/ffmpeg_decoder.dart
+import 'dart:io';
 import 'dart:typed_data';
-import 'package:ffi/ffi.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
-import 'native_library.dart';
-
-/// Holds decoded PCM data along with metadata like sample rate.
-class PcmData {
+class DecodedPcm {
   final Uint8List buffer;
   final int sampleRate;
-  PcmData(this.buffer, this.sampleRate);
+  const DecodedPcm(this.buffer, this.sampleRate);
 }
 
-/// Simple FFmpeg decoder wrapper using `dart:ffi`.
 class FFmpegDecoder {
-  final DynamicLibrary _lib;
-  late final _Decode _decode;
-  late final _Free _free;
+  /// 轉成 s16le 單聲道。你要雙聲道可把 -ac 改 2
+  Future<DecodedPcm> decode(
+    String inputPath, {
+    int sampleRate = 48000,
+    int channels = 1,
+  }) async {
+    final dir = await getTemporaryDirectory();
+    final out = File(
+      '${dir.path}/decode_${DateTime.now().millisecondsSinceEpoch}.pcm',
+    );
+    if (out.existsSync()) await out.delete();
+    // 轉檔指令：輸入 -> s16le raw PCM
+    final cmd = [
+      '-y',
+      '-i',
+      '"$inputPath"',
+      '-vn',
+      '-ac',
+      '$channels',
+      '-ar',
+      '$sampleRate',
+      '-f',
+      's16le',
+      '"${out.path}"',
+    ].join(' ');
 
-  FFmpegDecoder({DynamicLibrary? library})
-      : _lib = library ?? loadNativeLibrary('ffmpeg') {
-    _decode =
-        _lib.lookupFunction<_DecodeNative, _Decode>('decode_audio');
-    _free = _lib.lookupFunction<_FreeNative, _Free>('free_buffer');
-  }
+    final session = await FFmpegKit.execute(cmd);
+    final rc = await session.getReturnCode();
+    if (!ReturnCode.isSuccess(rc)) {
+      final logs = await session.getOutput();
+      throw 'FFmpeg failed ($rc): $logs';
+    }
 
-  /// Decode [filePath] into a PCM buffer. The native function returns a
-  /// pointer to the PCM data along with its length and sample rate.
-  PcmData decode(String filePath) {
-    final pathPtr = filePath.toNativeUtf8();
-    final lengthPtr = calloc<Int32>();
-    final sampleRatePtr = calloc<Int32>();
-
-    final dataPtr = _decode(pathPtr, lengthPtr, sampleRatePtr);
-    final length = lengthPtr.value;
-    final sampleRate = sampleRatePtr.value;
-
-    final buffer = Uint8List.fromList(dataPtr.asTypedList(length));
-
-    _free(dataPtr);
-    calloc.free(pathPtr);
-    calloc.free(lengthPtr);
-    calloc.free(sampleRatePtr);
-
-    return PcmData(buffer, sampleRate);
+    final bytes = await out.readAsBytes();
+    return DecodedPcm(bytes, sampleRate);
   }
 }
-
-typedef _DecodeNative = Pointer<Uint8> Function(
-    Pointer<Utf8>, Pointer<Int32>, Pointer<Int32>);
-typedef _Decode = Pointer<Uint8> Function(
-    Pointer<Utf8>, Pointer<Int32>, Pointer<Int32>);
-
-typedef _FreeNative = Void Function(Pointer<Uint8>);
-typedef _Free = void Function(Pointer<Uint8>);
