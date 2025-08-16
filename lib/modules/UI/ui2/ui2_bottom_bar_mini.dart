@@ -1,4 +1,4 @@
-import 'dart:ui' show FontFeature;
+import 'dart:ui' show FontFeature, ImageFilter;
 import 'package:flutter/material.dart';
 
 class MiniFooterBar extends StatelessWidget {
@@ -30,98 +30,174 @@ class MiniFooterBar extends StatelessWidget {
     return SafeArea(
       top: false,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 78),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        constraints: const BoxConstraints(minHeight: 86),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  // 深色到更深色的小漸層，提對比
+                  gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xF0050A12), Color(0xF00B1220)],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0x3326C6FF)),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x3326C6FF),
+                      blurRadius: 22,
+                      spreadRadius: 1,
+                    ),
+                    BoxShadow(
+                      color: Color(0x3300E5FF),
+                      blurRadius: 30,
+                      spreadRadius: -4,
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    // 匯入
+                    NeonButton(
+                      icon: Icons.library_music_rounded,
+                      label: '匯入',
+                      baseColor: const Color(0xFF00E5FF),
+                      onPressed: onImport,
+                    ),
+
+                    const SizedBox(width: 10),
+
+                    // 播放/暫停（圓形霓虹）
+                    NeonRoundButton(
+                      onPressed: onPlayPause,
+                      icon: isPlaying
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                      colors: const [Color(0xFF7C4DFF), Color(0xFF915CFF)],
+                    ),
+
+                    const SizedBox(width: 14),
+                    _DividerV(),
+                    const SizedBox(width: 12),
+
+                    // —— 短時間軸 —— 高對比滑桿
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 5,
+                          activeTrackColor: const Color(0xFF7C4DFF),
+                          inactiveTrackColor: const Color(0x33FFFFFF),
+                          thumbColor: const Color(0xFFB89AFF),
+                          disabledActiveTrackColor: const Color(0x33555555),
+                          overlayShape: SliderComponentShape.noOverlay,
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 9,
+                          ),
+                        ),
+                        child: Slider(
+                          value: v,
+                          min: 0,
+                          max: 1,
+                          onChanged: canScrub ? (_) {} : null,
+                          onChangeEnd: canScrub
+                              ? (nv) => onSeekMs((nv * durationMs).round())
+                              : null,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(width: 12),
+
+                    // 時間 / 總長（高對比資訊晶片）
+                    _NeonInfoChip(label: '時間', ms: positionMs),
+                    const SizedBox(width: 8),
+                    _NeonInfoChip(label: '總長', ms: durationMs),
+
+                    const SizedBox(width: 12),
+                    _DividerV(),
+                    const SizedBox(width: 12),
+
+                    // 匯出
+                    NeonButton(
+                      icon: Icons.download_rounded,
+                      label: '匯出 MP3',
+                      baseColor: const Color(0xFF7C4DFF),
+                      onPressed: onExport,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ————— 霓虹按鈕（矩形） —————
+class NeonButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color baseColor;
+  final VoidCallback onPressed;
+
+  const NeonButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.baseColor,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c1 = baseColor;
+    final c2 = _tint(baseColor, 0.18);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(14),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
-            color: const Color(0xCC0B0F15),
+            gradient: LinearGradient(colors: [c1, c2]),
             borderRadius: BorderRadius.circular(14),
-            boxShadow: const [
-              BoxShadow(color: Color(0x3326C6FF), blurRadius: 18),
+            boxShadow: [
+              BoxShadow(
+                color: c1.withOpacity(0.45),
+                blurRadius: 18,
+                spreadRadius: 0,
+              ),
             ],
-            border: Border.all(color: const Color(0x3326C6FF)),
           ),
           child: Row(
             children: [
-              // 匯入
-              ElevatedButton.icon(
-                onPressed: onImport,
-                style: _btnStyle(const Color(0xFF2EC6FF)),
-                icon: const Icon(Icons.library_music_rounded, size: 18),
-                label: const Text(
-                  '匯入',
-                  style: TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-
-              // 播放/暫停
-              ElevatedButton(
-                onPressed: onPlayPause,
-                style: ElevatedButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  backgroundColor: const Color(0xFF7C4DFF),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 12,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  elevation: 8,
-                  shadowColor: const Color(0x887C4DFF),
-                ),
-                child: Icon(
-                  isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                  size: 22,
-                ),
-              ),
-
-              const SizedBox(width: 14),
-              _DividerV(),
-              const SizedBox(width: 12),
-
-              // —— 短時間軸（置中，避免重疊）——
-              Expanded(
-                child: SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 4,
-                    overlayShape: SliderComponentShape.noOverlay,
-                    thumbShape: const RoundSliderThumbShape(
-                      enabledThumbRadius: 8,
-                    ),
-                  ),
-                  child: Slider(
-                    value: v,
-                    min: 0,
-                    max: 1,
-                    onChanged: canScrub ? (_) {} : null,
-                    onChangeEnd: canScrub
-                        ? (nv) => onSeekMs((nv * durationMs).round())
-                        : null,
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-              // 時間/總長
-              _TimeBox(label: '時間', ms: positionMs),
+              Icon(icon, size: 18, color: Colors.white),
               const SizedBox(width: 8),
-              _TimeBox(label: '總長', ms: durationMs),
-
-              const SizedBox(width: 12),
-              _DividerV(),
-              const SizedBox(width: 12),
-
-              // 匯出 MP3
-              ElevatedButton.icon(
-                onPressed: onExport,
-                style: _btnStyle(const Color(0xFF6C63FF)),
-                icon: const Icon(Icons.download_rounded, size: 18),
-                label: const Text(
-                  '匯出 MP3',
-                  style: TextStyle(fontWeight: FontWeight.w700),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.4,
+                  shadows: [
+                    Shadow(
+                      color: Colors.black54,
+                      blurRadius: 2,
+                      offset: Offset(0, 0.5),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -131,44 +207,89 @@ class MiniFooterBar extends StatelessWidget {
     );
   }
 
-  ButtonStyle _btnStyle(Color bg) => ElevatedButton.styleFrom(
-    foregroundColor: Colors.white,
-    backgroundColor: bg,
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-    elevation: 8,
-    shadowColor: bg.withOpacity(0.5),
-  );
+  Color _tint(Color c, double amt) {
+    final h = HSLColor.fromColor(c);
+    return h.withLightness((h.lightness + amt).clamp(0, 1)).toColor();
+  }
 }
 
-class _TimeBox extends StatelessWidget {
+/// ————— 霓虹按鈕（圓形） —————
+class NeonRoundButton extends StatelessWidget {
+  final VoidCallback onPressed;
+  final IconData icon;
+  final List<Color> colors;
+  const NeonRoundButton({
+    super.key,
+    required this.onPressed,
+    required this.icon,
+    required this.colors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkResponse(
+        onTap: onPressed,
+        radius: 28,
+        child: Container(
+          width: 54,
+          height: 54,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(colors: colors),
+            boxShadow: [
+              BoxShadow(
+                color: colors.first.withOpacity(0.45),
+                blurRadius: 22,
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: Icon(icon, size: 26, color: Colors.white),
+        ),
+      ),
+    );
+  }
+}
+
+/// ————— 高對比資訊晶片 —————
+class _NeonInfoChip extends StatelessWidget {
   final String label;
   final int ms;
-  const _TimeBox({required this.label, required this.ms});
+  const _NeonInfoChip({required this.label, required this.ms});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 44,
+      height: 46,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: const Color(0x220E1420),
+        color: const Color(0x330E1420),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0x2233CCFF)),
+        border: Border.all(color: const Color(0x3341D9FF)),
+        boxShadow: const [BoxShadow(color: Color(0x2200E5FF), blurRadius: 12)],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
             label,
-            style: const TextStyle(fontSize: 11, color: Colors.white60),
+            style: const TextStyle(
+              fontSize: 11,
+              color: Color(0xFFB7D7FF),
+              letterSpacing: 1.0,
+              fontWeight: FontWeight.w700,
+            ),
           ),
           const SizedBox(width: 8),
           Text(
             _fmt(ms),
             style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
               fontFeatures: [FontFeature.tabularFigures()],
-              fontWeight: FontWeight.w700,
+              shadows: [Shadow(blurRadius: 6, color: Color(0x5500E5FF))],
             ),
           ),
         ],
@@ -188,6 +309,15 @@ class _TimeBox extends StatelessWidget {
 
 class _DividerV extends StatelessWidget {
   @override
-  Widget build(BuildContext context) =>
-      Container(width: 1, height: 40, color: const Color(0x2233CCFF));
+  Widget build(BuildContext context) => Container(
+    width: 1,
+    height: 44,
+    decoration: BoxDecoration(
+      gradient: const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [Color(0x1126C6FF), Color(0x4426C6FF), Color(0x1126C6FF)],
+      ),
+    ),
+  );
 }
