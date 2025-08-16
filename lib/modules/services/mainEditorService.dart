@@ -1,8 +1,10 @@
+// lib/modules/services/mainEditorService.dart
 // ClipNote — MainEditorService（Lite：移除頻譜功能 + 互動編輯/磁吸）
 
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -11,34 +13,38 @@ import 'package:clipnote_audio/modules/services/singleTrackService.dart';
 import 'package:clipnote_audio/modules/merge_mix/mix_bus.dart';
 import 'package:clipnote_audio/modules/playback/playbackService.dart';
 
-// 自動對位（你之前加的）
+// 自動對位（磁吸）
 import 'package:clipnote_audio/modules/editing/snapping.dart';
 
 class MainEditorService extends ChangeNotifier {
   MainEditorService({PcmDecoder? decoder})
-    : _decoder = decoder ?? const FfmpegKitDecoder();
+    : _decoder = decoder ?? const FfmpegKitDecoder() {
+    // 初始化磁吸控制器：你提供了 getClipEdgePoints / getPlayheadMs / getDurationMs
+    snap = SnapController(
+      getClipEdgePoints: ({String? excludeId}) =>
+          _collectClipEdgePoints(excludeId: excludeId),
+      getPlayheadMs: () => playhead.value,
+      getDurationMs: () => durationMs,
+    );
+  }
 
+  // ===== 基本相依 =====
   final PcmDecoder _decoder;
-
-  // 狀態
-  final List<SingleTrackService> tracks = [];
   final PlaybackService _pb = PlaybackService.instance;
 
-  Uint8List? _masterPcmBytes; // s16le mono
+  // ===== 狀態 =====
+  final List<SingleTrackService> tracks = [];
+
+  Uint8List? _masterPcmBytes; // s16le mono（給電平/分析）
   int? _masterSampleRate;
 
   // UI notifiers
   final ValueNotifier<bool> playing = ValueNotifier(false);
   final ValueNotifier<int> playhead = ValueNotifier(0); // ms
   final ValueNotifier<double> meter = ValueNotifier(0); // 0..1
-
   Listenable get uiTick => Listenable.merge([playing, playhead, meter]);
 
-  // meter 視窗
-  static const int _meterWindow = 2048;
-  final Int16List _windowBuf = Int16List(_meterWindow);
-  final Int32List _accBuf = Int32List(_meterWindow);
-
+  // 播放與電平
   Timer? _uiTicker;
   double get volume01 => _pb.volume;
   int get durationMs => _pb.durationMs;
@@ -46,110 +52,58 @@ class MainEditorService extends ChangeNotifier {
   bool get isPlaying => playing.value;
   double get meterPeak01 => meter.value;
 
-  // —— Snapping —— //
-  final ValueNotifier<SnapPoint?> snapGuide = ValueNotifier<SnapPoint?>(null);
-  late final SnapController snap = SnapController(
-    getClipEdgePoints: ({String? excludeId}) =>
-        _collectClipEdgePoints(excludeId: excludeId),
-    getPlayheadMs: () => _pb.positionMs,
-    getDurationMs: () => durationMs,
-    config: const SnapConfig(
-      thresholdMs: 18,
-      gridStepMs: 500,
-      toClips: true,
-      toPlayhead: true,
-      toGrid: true,
-    ),
-  );
+  // ===== 電平視窗（極簡 Peak）=====
+  static const int _meterWindow = 2048;
+  final Int16List _windowBuf = Int16List(_meterWindow);
+  final Int32List _accBuf = Int32List(_meterWindow);
 
-  // NEW: 互動編輯旗標（拖曳中）
-  bool _interactiveEditing = false;
+  // ===== 重建節流 =====
+  Timer? _rebuildDebounce;
 
-  // === 放進 MainEditorService 類別內（任一成員區即可）===
+  // ===== 參考常數 =====
+  static const int _kSampleRate = 48000; // 引擎內部採樣率
 
-  // 建議把軌道增益限制在 -60 dB ~ 0 dB（0 dB = 1.0）
+  // ===== 軌道增益（dB 與 0..1 的互轉）=====
   static const double _gainDbMin = -60.0;
   static const double _gainDbMax = 0.0;
 
-  // 0..1 線性 → dB；0 代表靜音（取下限 -60 dB）
   double _gain01ToDb(double g) {
     if (g <= 0.0) return _gainDbMin;
     final db = 20.0 * (math.log(g) / math.ln10);
     return db.clamp(_gainDbMin, _gainDbMax);
   }
 
-  // dB → 0..1 線性；<= -60 dB 視為 0
   double _dbToGain01(double db) {
     if (db <= _gainDbMin) return 0.0;
     final g = math.pow(10.0, db / 20.0).toDouble();
-    // 極小值視覺上算 0，避免滑桿殘影
     return (g < 1e-3) ? 0.0 : g.clamp(0.0, 1.0);
   }
 
-  // 讀靜音狀態
   bool trackMuted(int i) {
     if (i < 0 || i >= tracks.length) return false;
     return tracks[i].isMuted;
   }
 
-  // 讀增益（0..1 給 UI Slider 用）
   double trackGain(int i) {
     if (i < 0 || i >= tracks.length) return 0.0;
     return _dbToGain01(tracks[i].trackGainDb);
   }
 
-  // ✅ 正確：呼叫 SingleTrackService.setMute()
   Future<void> toggleTrackMute(int i) async {
     if (i < 0 || i >= tracks.length) return;
     final t = tracks[i];
     t.setMute(!t.isMuted);
-    await rebuildMaster();
+    _scheduleRebuild();
   }
 
-  // ❌ 原本錯誤：tracks[i].trackGainDb = _gain01ToDb(gain01);
-  // ✅ 正確：呼叫 SingleTrackService.setTrackGainDb()
   Future<void> setTrackGain(int i, double gain01) async {
     if (i < 0 || i >= tracks.length) return;
     tracks[i].setTrackGainDb(_gain01ToDb(gain01));
-    await rebuildMaster();
+    _scheduleRebuild();
   }
 
-  Uint8List _pcmS16MonoToWav(Uint8List pcmS16le, int sampleRate) {
-    const int numChannels = 1;
-    const int bitsPerSample = 16;
-    final int byteRate = sampleRate * numChannels * (bitsPerSample >> 3);
-    final int blockAlign = numChannels * (bitsPerSample >> 3);
-    final int dataLen = pcmS16le.lengthInBytes;
-    final int totalLen = 44 + dataLen; // WAV header 44 bytes
-
-    final out = Uint8List(totalLen);
-    final bd = ByteData.sublistView(out);
-
-    // 'RIFF'
-    out.setAll(0, [0x52, 0x49, 0x46, 0x46]);
-    bd.setUint32(4, 36 + dataLen, Endian.little);
-    // 'WAVE'
-    out.setAll(8, [0x57, 0x41, 0x56, 0x45]);
-    // 'fmt '
-    out.setAll(12, [0x66, 0x6D, 0x74, 0x20]);
-    bd.setUint32(16, 16, Endian.little); // Subchunk1Size
-    bd.setUint16(20, 1, Endian.little); // AudioFormat=PCM
-    bd.setUint16(22, numChannels, Endian.little);
-    bd.setUint32(24, sampleRate, Endian.little);
-    bd.setUint32(28, byteRate, Endian.little);
-    bd.setUint16(32, blockAlign, Endian.little);
-    bd.setUint16(34, bitsPerSample, Endian.little);
-    // 'data'
-    out.setAll(36, [0x64, 0x61, 0x74, 0x61]);
-    bd.setUint32(40, dataLen, Endian.little);
-
-    // PCM payload
-    out.setRange(44, 44 + dataLen, pcmS16le);
-    return out;
-  }
-
+  // ===== 初始化 / 釋放 =====
   Future<void> initAsync() async {
-    // 預設兩條空軌（可直接拖片段進來）
     if (tracks.isEmpty) {
       tracks.add(
         SingleTrackService(decoder: _decoder, onChanged: _onTrackChanged),
@@ -159,16 +113,10 @@ class MainEditorService extends ChangeNotifier {
     _pullSampleWindow(); // 預熱電平
   }
 
-  void _onTrackChanged() {
-    // 若正在互動編輯，不主動重建 master；結束時統一重建
-    if (!_interactiveEditing) {
-      rebuildMaster();
-    }
-  }
-
   @override
   void dispose() {
     _uiTicker?.cancel();
+    _rebuildDebounce?.cancel();
     for (final t in tracks) {
       t.dispose();
     }
@@ -192,7 +140,7 @@ class MainEditorService extends ChangeNotifier {
         playing.value = true;
         _startUiTicker();
       } catch (e) {
-        debugPrint('Playback play failed: $e'); // 避免未處理例外
+        debugPrint('Playback play failed: $e');
         playing.value = false;
       }
     }
@@ -212,7 +160,7 @@ class MainEditorService extends ChangeNotifier {
     });
   }
 
-  // ===== 電平（略） =====
+  // ===== 電平（簡化：取峰值）=====
   void _pullSampleWindow() {
     if (_masterPcmBytes != null && _masterSampleRate != null) {
       final startSample = ((_pb.positionMs / 1000.0) * _masterSampleRate!)
@@ -222,6 +170,7 @@ class MainEditorService extends ChangeNotifier {
         startByte + (_meterWindow << 1),
         _masterPcmBytes!.length,
       );
+
       final view = ByteData.sublistView(_masterPcmBytes!);
       var peak = 0, o = 0;
       for (
@@ -254,10 +203,11 @@ class MainEditorService extends ChangeNotifier {
     var peak = 0;
     for (int i = 0; i < _meterWindow; i++) {
       int v = _accBuf[i];
-      if (v > 32767)
+      if (v > 32767) {
         v = 32767;
-      else if (v < -32768)
+      } else if (v < -32768) {
         v = -32768;
+      }
       _windowBuf[i] = v;
       final a = v >= 0 ? v : -v;
       if (a > peak) peak = a;
@@ -316,9 +266,11 @@ class MainEditorService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ===== 混音／載入播放器 =====
-  // 替換整個 _rebuildMasterAndLoad()
+  // ===== 混音／載入播放器（保留播放位置與狀態）=====
   Future<void> _rebuildMasterAndLoad() async {
+    final wasPlaying = _pb.isPlaying;
+    final keepPosMs = _pb.isLoaded ? _pb.positionMs : playhead.value;
+
     if (tracks.isEmpty) {
       _masterPcmBytes = null;
       _masterSampleRate = null;
@@ -328,11 +280,12 @@ class MainEditorService extends ChangeNotifier {
       return;
     }
 
+    // 準備每軌資料
     final pcmList = <Uint8List>[];
     final gainsDb = <double>[];
     final mutes = <bool>[];
     final solos = <bool>[];
-    const sr = kSampleRate;
+    const sr = _kSampleRate;
 
     for (final t in tracks) {
       final i16 = t.track.renderedPcm;
@@ -352,6 +305,7 @@ class MainEditorService extends ChangeNotifier {
       return;
     }
 
+    // 混音（非同步）
     final mix = await MixBus.mixAsync(
       tracksS16: pcmList,
       gainsDb: gainsDb,
@@ -360,11 +314,11 @@ class MainEditorService extends ChangeNotifier {
       sampleRate: sr,
     );
 
-    // 1) 電平/分析用：保留裸 PCM
+    // 給電平用的裸 PCM
     _masterPcmBytes = mix.pcmS16;
     _masterSampleRate = mix.sampleRate;
 
-    // 2) 播放器用：包成 WAV
+    // 播放用 WAV
     final wavBytes = _pcmS16MonoToWav(mix.pcmS16, mix.sampleRate);
 
     try {
@@ -374,14 +328,20 @@ class MainEditorService extends ChangeNotifier {
       rethrow;
     }
 
-    if (_pb.isPlaying) {
+    // 還原播放位置（夾在新時長範圍內）
+    final newDurMs = _pb.durationMs;
+    final targetMs = (keepPosMs.clamp(0, newDurMs)) as int;
+    await _pb.seekTo(targetMs);
+    playhead.value = _pb.positionMs;
+
+    // 還原播放狀態
+    if (wasPlaying) {
       await _pb.play();
       playing.value = true;
       _startUiTicker();
     } else {
       playing.value = false;
     }
-    playhead.value = _pb.positionMs;
   }
 
   Uint8List _i16ToBytes(Int16List i16) {
@@ -393,6 +353,7 @@ class MainEditorService extends ChangeNotifier {
     return out;
   }
 
+  // 對外 API
   Future<void> seekTo(int ms) async {
     if (!_pb.isLoaded) await _rebuildMasterAndLoad();
     await _pb.seekTo(ms);
@@ -406,50 +367,101 @@ class MainEditorService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ====== 互動編輯 API（給 Waveform 手勢用） ======
+  // ===== 內部：節流重建 =====
+  void _scheduleRebuild([Duration delay = const Duration(milliseconds: 120)]) {
+    if (_interactiveEditing) return; // 拖曳互動期間不重建
+    _rebuildDebounce?.cancel();
+    _rebuildDebounce = Timer(delay, () async {
+      await rebuildMaster();
+    });
+  }
+
+  void _onTrackChanged() {
+    if (_interactiveEditing) return; // 拖曳中只動 UI
+    _scheduleRebuild();
+  }
+
+  // --------------------------------------------------------------------------
+  // 互動編輯（拖曳＋磁吸）
+  // --------------------------------------------------------------------------
+
+  bool _interactiveEditing = false;
+  final Set<SingleTrackService> _touchedTracks = {};
+
+  // 導引線（UI 畫高亮）
+  final ValueNotifier<SnapPoint?> snapGuide = ValueNotifier<SnapPoint?>(null);
+
+  late final SnapController snap;
+
   void beginInteractiveEdit() {
+    if (_interactiveEditing) return;
     _interactiveEditing = true;
-    for (final t in tracks) {
-      t.setRenderSuspended(true);
-    }
-    // 清掉暫存指引線
+    _touchedTracks.clear();
+    snap.beginDrag();
     snapGuide.value = null;
   }
 
-  /// 拖曳中：回傳吸附後的位置（毫秒），同時只更新 UI，不重建
-  int updateInteractiveDrag({
+  /// 拖曳過程：更新該段的目的時間，但【不重建混音】
+  void updateInteractiveDrag({
     required SingleTrackService track,
     required Segment segment,
     required int rawMs,
+    required bool snappingEnabled,
     String? excludeId,
   }) {
-    final res = snap.snapMs(rawMs, excludeId: excludeId);
-    final snapMs = res?.snappedMs ?? rawMs;
-    if (res != null) snapGuide.value = res.target;
-    track.moveSegmentFast(segment, newDstOffsetMs: snapMs); // 不渲染
-    return snapMs;
+    // 第一次觸碰：暫停該軌渲染，避免每 1px 都重算
+    final firstTouch = _touchedTracks.add(track);
+    if (firstTouch) track.setRenderSuspended(true);
+
+    // 磁吸
+    int dst = rawMs;
+    final res = snap.snapMs(
+      rawMs,
+      excludeId: excludeId,
+      snappingEnabled: snappingEnabled,
+    );
+    if (res != null) {
+      dst = res.snappedMs;
+      snapGuide.value = res.target; // UI 畫導引線
+    } else {
+      snapGuide.value = null;
+    }
+
+    // 輕量位移（只改 segment.dstOffsetMs 與 UI）
+    track.moveSegmentFast(segment, newDstOffsetMs: dst);
   }
 
-  /// 結束拖曳：清指引線、恢復渲染，然後一次重建/混音
-  Future<void> endInteractiveEdit() async {
+  /// 放開手指/滑鼠：只重建 touched 軌 → 重建 master →（選擇性）seek
+  Future<void> endInteractiveEdit({int? postSeekMs}) async {
+    snap.endDrag();
+    final touched = List<SingleTrackService>.from(_touchedTracks);
+    _touchedTracks.clear();
+    _interactiveEditing = false;
     snapGuide.value = null;
-    for (final t in tracks) {
+
+    // 解除渲染暫停並同步重建這些軌
+    for (final t in touched) {
       t.setRenderSuspended(false);
       t.rebuildRenderedNow();
       t.buildDownsampledWaveform(step: 128);
     }
-    _interactiveEditing = false;
-    await rebuildMaster();
+
+    // 重建 master，保留原播放狀態/位置
+    await _rebuildMasterAndLoad();
+
+    // 如指定，跳到新的位置（例：段落新起點）
+    if (postSeekMs != null) {
+      final ms = (postSeekMs.clamp(0, durationMs)) as int;
+      await seekTo(ms);
+    }
   }
 
-  // —— 供磁吸掃描 —— //
+  // 收集可磁吸的片段邊緣
   List<SnapPoint> _collectClipEdgePoints({String? excludeId}) {
     final points = <SnapPoint>[];
     for (final t in tracks) {
-      final segs = t.track.segments;
-      for (final s in segs) {
-        final sid = (s.id ?? '').toString();
-        if (excludeId != null && sid == excludeId) continue;
+      for (final s in t.track.segments) {
+        if (excludeId != null && s.id == excludeId) continue;
         final start = s.dstOffsetMs;
         final end = start + s.srcDurationMs;
         points.add(SnapPoint(start, 'clip-start'));
@@ -457,5 +469,40 @@ class MainEditorService extends ChangeNotifier {
       }
     }
     return points;
+  }
+
+  // ===== WAV 封裝 =====
+  Uint8List _pcmS16MonoToWav(Uint8List pcmS16le, int sampleRate) {
+    const int numChannels = 1;
+    const int bitsPerSample = 16;
+    final int byteRate = sampleRate * numChannels * (bitsPerSample >> 3);
+    final int blockAlign = numChannels * (bitsPerSample >> 3);
+    final int dataLen = pcmS16le.lengthInBytes;
+    final int totalLen = 44 + dataLen; // WAV header 44 bytes
+
+    final out = Uint8List(totalLen);
+    final bd = ByteData.sublistView(out);
+
+    // 'RIFF'
+    out.setAll(0, [0x52, 0x49, 0x46, 0x46]);
+    bd.setUint32(4, 36 + dataLen, Endian.little);
+    // 'WAVE'
+    out.setAll(8, [0x57, 0x41, 0x56, 0x45]);
+    // 'fmt '
+    out.setAll(12, [0x66, 0x6D, 0x74, 0x20]);
+    bd.setUint32(16, 16, Endian.little); // Subchunk1Size
+    bd.setUint16(20, 1, Endian.little); // AudioFormat=PCM
+    bd.setUint16(22, numChannels, Endian.little);
+    bd.setUint32(24, sampleRate, Endian.little);
+    bd.setUint32(28, byteRate, Endian.little);
+    bd.setUint16(32, blockAlign, Endian.little);
+    bd.setUint16(34, bitsPerSample, Endian.little);
+    // 'data'
+    out.setAll(36, [0x64, 0x61, 0x74, 0x61]);
+    bd.setUint32(40, dataLen, Endian.little);
+
+    // PCM payload
+    out.setRange(44, 44 + dataLen, pcmS16le);
+    return out;
   }
 }
