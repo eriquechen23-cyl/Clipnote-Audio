@@ -1,6 +1,7 @@
 // ui2_pages.dart
 // ignore_for_file: unnecessary_this
 
+import 'package:clipnote_audio/modules/services/track_lane_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:clipnote_audio/modules/UI/ui2/ui2_primitives.dart'; // Glass
@@ -115,12 +116,14 @@ class _TracksPageState extends State<TracksPage> {
   static const double _followBias = 0.35; // 播放頭維持在右側 35% 位置
   static const double _edgeMargin = 120;
   static const Duration _animDur = Duration(milliseconds: 120);
+  late final TrackLaneService _laneSvc; // ★ 共用：一次只選一個 lane
 
   @override
   void initState() {
     super.initState();
     widget.editor.playhead.addListener(_onTick);
     widget.editor.playing.addListener(_maybeAutoFollow);
+    _laneSvc = TrackLaneService(widget.editor); // ★ 父層只建一次
   }
 
   @override
@@ -222,53 +225,76 @@ class _TracksPageState extends State<TracksPage> {
                 ),
                 itemCount: widget.tracks.length,
                 itemBuilder: (context, i) {
-                  final name = widget.tracks[i].name;
-                  final color = widget.tracks[i].color;
+                  final laneId = 'lane-$i';
+                  final trackSvc = widget.tracks[i];
 
-                  return SizedBox(
-                    height: _rowHeight,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          // 左側控制欄
-                          SizedBox(
-                            width: _headerW,
-                            child: _TrackHeader(
-                              index: i,
-                              name: name,
-                              color: color,
-                              isMuted: widget.editor.trackMuted(i),
-                              gain: widget.editor.trackGain(i),
-                              onToggleMute: () =>
-                                  widget.editor.toggleTrackMute(i),
-                              onDelete: () => widget.onDeleteTrack(i),
-                              onGainChanged: (v) =>
-                                  widget.editor.setTrackGain(i, v),
-                            ),
-                          ),
-                          const SizedBox(width: _gutterW),
+                  return ValueListenableBuilder<String?>(
+                    valueListenable: _laneSvc.selectedLaneId,
+                    builder: (_, selectedLaneId, __) {
+                      final isSelectedLane = selectedLaneId == laneId;
 
-                          // 右側：音軌區（各自 controller，但已被群組連動）
-                          Expanded(
-                            child: ClipRRect(
+                      return SizedBox(
+                        height: _rowHeight,
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: isSelectedLane
+                                  ? const Color(0x1A22D3EE) // 淡青色高亮
+                                  : Colors.transparent,
                               borderRadius: BorderRadius.circular(10),
-                              child: TrackLane(
-                                track: widget.tracks[i],
-                                editor: widget.editor,
-                                pxPerMs: widget.pxPerMs,
-                                durationMs: widget.durationMs,
-                                canEdit: widget.canEdit,
-                                scrollController: _hGroup.controllerAt(i),
-                                showPlayhead: false, // 由父層畫公共紅線
-                                autoFollow: false, // 由父層統一追隨
-                              ),
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                // 左側控制欄
+                                SizedBox(
+                                  width: _headerW,
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () => _laneSvc.selectLane(
+                                      laneId,
+                                    ), // ★ 點 header 即選 lane
+                                    child: _TrackHeader(
+                                      index: i,
+                                      name: trackSvc.name,
+                                      color: trackSvc.color,
+                                      isMuted: widget.editor.trackMuted(i),
+                                      gain: widget.editor.trackGain(i),
+                                      onToggleMute: () =>
+                                          widget.editor.toggleTrackMute(i),
+                                      onDelete: () => widget.onDeleteTrack(i),
+                                      onGainChanged: (v) =>
+                                          widget.editor.setTrackGain(i, v),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: _gutterW),
+
+                                // 右側：音軌區（各自 controller，但被 _hGroup 連動）
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: TrackLane(
+                                      laneId: laneId, // ★ 傳唯一 ID
+                                      laneSvc: _laneSvc, // ★ 共用 service（單一選取）
+                                      track: trackSvc,
+                                      editor: widget.editor,
+                                      pxPerMs: widget.pxPerMs,
+                                      durationMs: widget.durationMs,
+                                      canEdit: widget.canEdit,
+                                      scrollController: _hGroup.controllerAt(i),
+                                      showPlayhead: false, // 由父層畫公共紅線
+                                      autoFollow: false, // 由父層統一追隨
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                        ],
-                      ),
-                    ),
+                        ),
+                      );
+                    },
                   );
                 },
               ),

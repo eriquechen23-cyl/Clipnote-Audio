@@ -1,28 +1,29 @@
 // lib/modules/UI/ui2/ui2_track_lane.dart
 import 'dart:math' as math;
+import 'package:clipnote_audio/modules/services/track_lane_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart'; // Alt 切換磁吸（桌面）
 import 'package:clipnote_audio/modules/services/singleTrackService.dart';
 import 'package:clipnote_audio/modules/services/mainEditorService.dart';
 
 class TrackLane extends StatefulWidget {
+  final String laneId; // 唯一 lane ID（例如 "lane-0"）
+  final TrackLaneService laneSvc; // 共用 Service（父層傳入）
   final SingleTrackService track;
   final MainEditorService editor;
   final double pxPerMs;
   final int durationMs; // 編輯器總長（用來算寬度）
   final bool canEdit;
 
-  // ★ 新增：共用的水平 ScrollController（若未提供就用內建）
-  final ScrollController? scrollController;
-
-  // ★ 新增：是否在本 lane 畫播放頭（預設 false；通常由父層統一畫一條）
-  final bool showPlayhead;
-
-  // ★ 新增：是否啟用「本 lane 自動追隨播放頭」（父層控卷軸時設 false）
-  final bool autoFollow;
+  final ScrollController? scrollController; // 共用水平卷軸（可選）
+  final bool showPlayhead; // 是否在本 lane 畫播放頭
+  final bool autoFollow; // 是否啟用自動追隨
 
   const TrackLane({
     super.key,
+    required this.laneId,
+    required this.laneSvc,
     required this.track,
     required this.editor,
     required this.pxPerMs,
@@ -42,14 +43,18 @@ class _TrackLaneState extends State<TrackLane> {
   ScrollController get _sc => widget.scrollController ?? _ownSc;
 
   // 使用者主動捲動或拖曳時，暫停自動追隨
+  bool get _userDraggingSeg => widget.laneSvc.isDragging;
   bool _userScrolling = false;
-  bool _userDraggingSeg = false;
   double _viewportWidth = 0;
 
   // 追隨參數
   static const double _followBias = 0.35; // 播放頭落在視窗寬度的 35% 處
   static const double _edgeMargin = 120; // 播放頭距離邊緣 < 這個距離就自動捲
   static const Duration _animDur = Duration(milliseconds: 120);
+
+  // Alt 臨時關閉磁吸 + 鎖捲動
+  bool _snapOn = true;
+  bool _scrollLocked = false; // ★ 拖曳期間關閉水平滾動，避免手勢被 ScrollView 搶走
 
   @override
   void initState() {
@@ -59,6 +64,7 @@ class _TrackLaneState extends State<TrackLane> {
       widget.editor.playing.addListener(_maybeAutoFollow);
       widget.track.track.addListener(_maybeAutoFollow);
     }
+    RawKeyboard.instance.addListener(_onKey); // Alt 切換磁吸
   }
 
   @override
@@ -89,16 +95,25 @@ class _TrackLaneState extends State<TrackLane> {
       widget.editor.playing.removeListener(_maybeAutoFollow);
       widget.track.track.removeListener(_maybeAutoFollow);
     }
+    RawKeyboard.instance.removeListener(_onKey);
     _ownSc.dispose();
     super.dispose();
   }
 
+  // === 工具 ===
   int get _laneMs => math.max(widget.durationMs, widget.track.durationMs);
   double ms2x(int ms) => ms * widget.pxPerMs;
 
+  void _onKey(RawKeyEvent e) {
+    final altNow =
+        RawKeyboard.instance.keysPressed.contains(LogicalKeyboardKey.altLeft) ||
+        RawKeyboard.instance.keysPressed.contains(LogicalKeyboardKey.altRight);
+    final newSnapOn = !altNow;
+    if (newSnapOn != _snapOn) setState(() => _snapOn = newSnapOn);
+  }
+
   void _maybeAutoFollow() {
     if (!mounted || !widget.autoFollow) return;
-    // 僅在播放且非使用者主動操作時追隨
     if (!widget.editor.isPlaying || _userScrolling || _userDraggingSeg) return;
     if (!_sc.hasClients || _viewportWidth <= 0) return;
 
@@ -109,12 +124,10 @@ class _TrackLaneState extends State<TrackLane> {
     final left = _sc.position.pixels;
     final right = left + _viewportWidth;
 
-    // 播放頭已經在安全區域內就不動
     final safeLeft = left + _edgeMargin;
     final safeRight = right - _edgeMargin;
     if (playheadX >= safeLeft && playheadX <= safeRight) return;
 
-    // 目標：把播放頭放在視窗寬度的 _followBias 處
     double targetLeft = playheadX - _viewportWidth * _followBias;
     final maxScroll = math.max(0.0, laneWidth - _viewportWidth);
     targetLeft = targetLeft.clamp(0.0, maxScroll);
@@ -122,43 +135,79 @@ class _TrackLaneState extends State<TrackLane> {
     _sc.animateTo(targetLeft, duration: _animDur, curve: Curves.easeOut);
   }
 
-  // === 片段拖曳 ===
-  Segment? _dragging;
-  int _dragStartMs = 0;
-  double _dragStartDx = 0;
-
-  void _onPanStart(Segment seg, DragStartDetails d) {
-    if (!widget.canEdit) return;
-    _dragging = seg;
-    _dragStartDx = d.localPosition.dx;
-    _dragStartMs = seg.dstOffsetMs;
-    _userDraggingSeg = true;
-    widget.editor.beginInteractiveEdit();
-  }
-
-  void _onPanUpdate(Segment seg, DragUpdateDetails d) {
-    if (!widget.canEdit || _dragging == null) return;
-    final dx = d.localPosition.dx - _dragStartDx;
-    final rawMs = (_dragStartMs + dx / widget.pxPerMs).round();
-    widget.editor.updateInteractiveDrag(
-      track: widget.track,
-      segment: seg,
-      rawMs: rawMs.clamp(0, _laneMs),
-      excludeId: seg.id,
-    );
-    setState(() {}); // 讓 UI 跟著動
-  }
-
-  void _onPanEnd(_) async {
-    if (!widget.canEdit) return;
-    _dragging = null;
-    _userDraggingSeg = false;
-    await widget.editor.endInteractiveEdit();
-  }
-
-  void _onTapDown(TapDownDetails d) {
+  // === 背景/片段互動 ===
+  void _onBackgroundTapUp(TapUpDetails d) {
+    widget.laneSvc.clearSelection(); // 點空白清除選取
     final ms = (d.localPosition.dx / widget.pxPerMs).round().clamp(0, _laneMs);
     widget.editor.seekTo(ms);
+  }
+
+  void _onSegmentTap(Segment seg) {
+    widget.laneSvc.selectSegment(laneId: widget.laneId, segId: seg.id);
+  }
+
+  // --- 片段拖曳（用 HorizontalDrag，並在 pointer down 鎖滾動） ---
+  void _onDragDown(PointerDownEvent _) {
+    // 指針按下就先鎖滾動，避免手勢被 ScrollView 搶走
+    if (!_scrollLocked) setState(() => _scrollLocked = true);
+  }
+
+  // ★ 提交目前 segment 的最終位置（寫回資料層）
+  void _commitSegment(Segment seg) {
+    widget.track.setSegmentOffset(seg, newDstOffsetMs: seg.dstOffsetMs);
+  }
+
+  void _onHorizontalDragStart(Segment seg, DragStartDetails d) {
+    if (!widget.canEdit) return;
+
+    final started = widget.laneSvc.panStart(
+      laneId: widget.laneId,
+      track: widget.track,
+      segment: seg,
+      localDx: d.localPosition.dx,
+    );
+
+    // 若是「第一次只是選取」，這次拖曳不啟動：解鎖滾動（讓使用者再拖一次就會真的拖）
+    if (!started) {
+      if (_scrollLocked) setState(() => _scrollLocked = false);
+      return;
+    }
+    // started == true：維持鎖滾動直到拖曳結束
+  }
+
+  void _onHorizontalDragUpdate(Segment seg, DragUpdateDetails d) {
+    if (!widget.canEdit || !widget.laneSvc.isDragging) return;
+
+    widget.laneSvc.panUpdate(
+      localDx: d.localPosition.dx,
+      pxPerMs: widget.pxPerMs,
+      laneMs: _laneMs,
+      snappingEnabled: _snapOn,
+    );
+
+    widget.laneSvc.autoScrollWhileDragging(
+      controller: _sc,
+      viewportWidth: _viewportWidth,
+      pxPerMs: widget.pxPerMs,
+      laneMs: _laneMs,
+      edgeMargin: _edgeMargin,
+    );
+
+    setState(() {}); // 僅移動 Positioned
+  }
+
+  Future<void> _onHorizontalDragEnd(Segment seg, _) async {
+    if (!widget.canEdit) return;
+    _commitSegment(seg); // 保險提交
+    await widget.laneSvc.panEnd(postSeekMs: seg.dstOffsetMs); // ★ 傳新位置
+    if (_scrollLocked) setState(() => _scrollLocked = false);
+  }
+
+  void _onDragCancelFor(Segment seg) async {
+    if (_scrollLocked) setState(() => _scrollLocked = false);
+    if (!widget.canEdit) return;
+    _commitSegment(seg); // 保險提交
+    await widget.laneSvc.panEnd(postSeekMs: seg.dstOffsetMs); // ★ 傳新位置
   }
 
   @override
@@ -167,6 +216,8 @@ class _TrackLaneState extends State<TrackLane> {
       widget.track.track,
       widget.editor.playhead,
       widget.editor.snapGuide,
+      widget.laneSvc.selectedLaneId, // 當前被選的 lane
+      widget.laneSvc.selectedSegmentId, // 當前被選的 segment
     ]);
 
     final laneWidth = ms2x(_laneMs) + 40;
@@ -174,7 +225,6 @@ class _TrackLaneState extends State<TrackLane> {
     return LayoutBuilder(
       builder: (context, constraints) {
         _viewportWidth = constraints.maxWidth;
-        // 每次版面改變時嘗試自動追隨一次
         WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoFollow());
 
         return ClipRRect(
@@ -188,7 +238,6 @@ class _TrackLaneState extends State<TrackLane> {
                   onNotification: (n) {
                     if (n is UserScrollNotification &&
                         n.metrics.axis == Axis.horizontal) {
-                      // 使用者主動滾動 → 暫停追隨；停止 800ms 後恢復
                       if (n.direction != ScrollDirection.idle) {
                         _userScrolling = true;
                       } else {
@@ -202,13 +251,24 @@ class _TrackLaneState extends State<TrackLane> {
                     return false;
                   },
                   child: SingleChildScrollView(
-                    controller: _sc, // ★ 使用共用 controller
+                    controller: _sc,
                     scrollDirection: Axis.horizontal,
+                    physics: _scrollLocked
+                        ? const NeverScrollableScrollPhysics() // ★ 拖曳時關閉水平滾動
+                        : const ClampingScrollPhysics(),
                     child: SizedBox(
                       width: laneWidth,
                       height: double.infinity,
                       child: Stack(
                         children: [
+                          // 0) 背景點擊 Seek（置底）
+                          Positioned.fill(
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.deferToChild,
+                              onTapUp: _onBackgroundTapUp,
+                              child: const SizedBox.expand(),
+                            ),
+                          ),
                           // 1) 背景網格
                           CustomPaint(
                             size: Size(laneWidth, double.infinity),
@@ -227,23 +287,38 @@ class _TrackLaneState extends State<TrackLane> {
                           ...widget.track.track.segments.map((seg) {
                             final x = ms2x(seg.dstOffsetMs);
                             final w = math.max(32.0, ms2x(seg.srcDurationMs));
+                            final selected =
+                                widget.laneSvc.isLaneSelected(widget.laneId) &&
+                                widget.laneSvc.isSegmentSelected(seg.id);
+
                             return Positioned(
                               left: x,
                               top: 6,
                               width: w,
                               bottom: 6,
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onPanStart: (d) => _onPanStart(seg, d),
-                                onPanUpdate: (d) => _onPanUpdate(seg, d),
-                                onPanEnd: _onPanEnd,
-                                child: _SegmentCard(
-                                  name: widget.track.name,
-                                  color: widget.track.color,
-                                  fadeInMs: seg.fadeInMs,
-                                  fadeOutMs: seg.fadeOutMs,
-                                  durationMs: seg.srcDurationMs,
-                                  pxPerMs: widget.pxPerMs,
+                              child: Listener(
+                                // ★ 先攔截 pointerDown 來鎖捲動
+                                onPointerDown: _onDragDown,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => _onSegmentTap(seg), // 點一下先選取
+                                  onHorizontalDragStart: (d) =>
+                                      _onHorizontalDragStart(seg, d),
+                                  onHorizontalDragUpdate: (d) =>
+                                      _onHorizontalDragUpdate(seg, d),
+                                  onHorizontalDragEnd: (d) =>
+                                      _onHorizontalDragEnd(seg, d), // ★ 傳 seg
+                                  onHorizontalDragCancel: () =>
+                                      _onDragCancelFor(seg), // ★ 取消也提交
+                                  child: _SegmentCard(
+                                    name: widget.track.name,
+                                    color: widget.track.color,
+                                    fadeInMs: seg.fadeInMs,
+                                    fadeOutMs: seg.fadeOutMs,
+                                    durationMs: seg.srcDurationMs,
+                                    pxPerMs: widget.pxPerMs,
+                                    selected: selected,
+                                  ),
                                 ),
                               ),
                             );
@@ -276,13 +351,6 @@ class _TrackLaneState extends State<TrackLane> {
                                 ),
                               ),
                             ),
-                          // 6) 點擊 Seek
-                          Positioned.fill(
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTapDown: _onTapDown,
-                            ),
-                          ),
                         ],
                       ),
                     ),
@@ -297,7 +365,7 @@ class _TrackLaneState extends State<TrackLane> {
   }
 }
 
-// === 以下畫 UI 的小類保持不變 ===
+// === 以下畫 UI 的小類保持不變（SegmentCard 多一個 selected 參數） ===
 
 class _SegmentCard extends StatelessWidget {
   final String name;
@@ -306,6 +374,7 @@ class _SegmentCard extends StatelessWidget {
   final int fadeOutMs;
   final int durationMs;
   final double pxPerMs;
+  final bool selected;
 
   const _SegmentCard({
     required this.name,
@@ -314,17 +383,31 @@ class _SegmentCard extends StatelessWidget {
     required this.fadeOutMs,
     required this.durationMs,
     required this.pxPerMs,
+    required this.selected,
   });
 
   @override
   Widget build(BuildContext context) {
     final bg = color.withOpacity(0.18);
     final bd = color.withOpacity(0.85);
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: bd, width: 1),
+        border: Border.all(
+          color: selected ? Colors.cyanAccent : bd,
+          width: selected ? 2 : 1,
+        ),
+        boxShadow: selected
+            ? [
+                BoxShadow(
+                  color: Colors.cyanAccent.withOpacity(0.25),
+                  blurRadius: 12,
+                  spreadRadius: 2,
+                ),
+              ]
+            : const [],
       ),
       child: Stack(
         children: [

@@ -282,16 +282,6 @@ class SingleTrackService {
     _touch();
   }
 
-  /// 拖曳過程快速移動（不進入 debounce、不重建）
-  void moveSegmentFast(Segment seg, {required int newDstOffsetMs}) {
-    final i = track.segments.indexOf(seg);
-    if (i < 0) return;
-    track.segments[i] = seg.copyWith(dstOffsetMs: newDstOffsetMs);
-    track.isDirty.value = true;
-    track.notifyListeners(); // 僅通知 UI 重畫
-    _onChanged?.call(); // 讓上層知道有改（MainEditor 會延後混音）
-  }
-
   void trimSegment(Segment seg, {int? newSrcStartMs, int? newSrcEndMs}) {
     final i = track.segments.indexOf(seg);
     if (i < 0) return;
@@ -564,5 +554,19 @@ class SingleTrackService {
     if (db <= kTrackGainDbMin) return 0.0;
     final g = math.pow(10.0, db / 20.0).toDouble();
     return (g < 1e-3) ? 0.0 : g.clamp(0.0, 1.0);
+  }
+
+  // ★ 拖曳中呼叫：只更新位置 + 輕量通知，千萬別觸發混音
+  void moveSegmentFast(Segment seg, {required int newDstOffsetMs}) {
+    if (seg.dstOffsetMs == newDstOffsetMs) return;
+    seg.dstOffsetMs = newDstOffsetMs;
+    _markChanged(); // ← 改這行：通知 track + 通知上層，而不是 notifyListeners()
+  }
+
+  // ★ 需要「正式寫回」才用這個（例如拖曳結束時）
+  void setSegmentOffset(Segment seg, {required int newDstOffsetMs}) {
+    if (seg.dstOffsetMs == newDstOffsetMs) return;
+    seg.dstOffsetMs = newDstOffsetMs;
+    _markChanged(); // ← 同上
   }
 }
