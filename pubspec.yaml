@@ -21,8 +21,10 @@ dependencies:
   flutter_launcher_icons: ^0.14.4
   audioplayers: ^5.2.1
   fl_chart: ^0.69.0   # 用最新小版也行
-
-
+  file_saver: ^0.2.12          # 行動端：自動寫到 Downloads；iOS 走系統面板
+  flutter_file_dialog: ^3.0.2  # 後備：如果 FileSaver 失敗，跳出存檔對話框
+  device_info_plus: ^10.1.0
+  permission_handler: ^11.3.1
 
 dev_dependencies:
   flutter_test:

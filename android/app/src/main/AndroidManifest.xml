@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-<uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+ <!-- Android 10–12L 讀外部儲存（選檔/讀檔用；寫入下載用 SAF/MediaStore 不需要，但宣告這個對舊機型較保險） -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
     <application
         android:label="clipnote_audio"
         android:name="${applicationName}"

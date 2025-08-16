@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math' as math;
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 class PlaybackService {
   static final PlaybackService instance = PlaybackService._internal();
@@ -80,16 +83,70 @@ class PlaybackService {
     await _player.setPlaybackRate(_speed);
   }
 
-  Future<void> load({required Uint8List bytes, required int sampleRate}) async {
-    _pcmI16 = _bytesToI16(bytes);
-    _sampleRate = sampleRate;
-    final wav = _wrapS16AsWav(bytes, sampleRate, channels: 1);
+  Future<void> load({
+    required Uint8List pcmS16, // 原始 mono s16 小端
+    required int sampleRate,
+  }) async {
+    // 清狀態
     await _player.stop();
-    await _player.setSource(BytesSource(wav));
+    _isLoaded = false;
+    _isPlaying = false;
+    _positionMs = 0;
+    _durationMs = 0;
+
+    // 電平用快取
+    _pcmI16 = _bytesToI16(pcmS16);
+    _sampleRate = sampleRate;
+
+    // 包成 WAV（mono 16-bit）
+    final wav = _wrapS16AsWav(pcmS16, sampleRate, channels: 1);
+
+    // 等到 duration > 0 才算 ready
+    final ready = Completer<void>();
+    late final StreamSubscription sub;
+    sub = _player.onDurationChanged.listen((d) {
+      _durationMs = d.inMilliseconds;
+      if (d > Duration.zero && !ready.isCompleted) {
+        ready.complete();
+      }
+    });
+
+    // 先試 BytesSource；失敗再落地文件
+    bool usedFileFallback = false;
+    try {
+      // 有些版本可用這個：await _player.setSourceBytes(wav);
+      await _player.setSource(BytesSource(wav));
+    } on PlatformException catch (_) {
+      // Fallback：寫暫存檔再用檔案來源載入
+      usedFileFallback = true;
+      final dir = await getTemporaryDirectory();
+      final path =
+          '${dir.path}/clipnote_mix_${DateTime.now().millisecondsSinceEpoch}.wav';
+      final f = File(path);
+      await f.writeAsBytes(wav, flush: true);
+      await _player.setSourceDeviceFile(path);
+    }
+
+    // 暖機（有些裝置沒這步不會立刻吐 duration）
+    try {
+      await _player.resume();
+      await _player.pause();
+    } catch (_) {
+      // 某些 ROM/模擬器不需要，失敗略過
+    }
+
+    try {
+      await ready.future.timeout(const Duration(seconds: 3));
+      _isLoaded = true;
+    } finally {
+      await sub.cancel();
+    }
+
+    // 還原音量與倍速
     await _player.setPlaybackRate(_speed);
     await _player.setVolume(_volume);
-    _isLoaded = true;
-    _positionMs = 0;
+
+    // 你如果想在 fallback=檔案 時釋放暫存，可在 unload() 裡刪，或這裡記錄路徑後面統一清理
   }
 
   Future<void> play() async {
