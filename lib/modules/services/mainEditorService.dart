@@ -2,9 +2,14 @@
 // ClipNote — MainEditorService（Lite：移除頻譜功能 + 互動編輯/磁吸）
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math' as math;
 
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
+import 'package:file_saver/file_saver.dart';
 import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -15,6 +20,12 @@ import 'package:clipnote_audio/modules/playback/playbackService.dart';
 
 // 自動對位（磁吸）
 import 'package:clipnote_audio/modules/editing/snapping.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_file_dialog/flutter_file_dialog.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+enum AudioExportFormat { mp3, m4a, wav }
 
 class MainEditorService extends ChangeNotifier {
   MainEditorService({PcmDecoder? decoder})
@@ -315,14 +326,12 @@ class MainEditorService extends ChangeNotifier {
     );
 
     // 給電平用的裸 PCM
-    _masterPcmBytes = mix.pcmS16;
+    _masterPcmBytes = mix.pcmS16; // s16le mono
     _masterSampleRate = mix.sampleRate;
 
-    // 播放用 WAV
-    final wavBytes = _pcmS16MonoToWav(mix.pcmS16, mix.sampleRate);
-
+    // ✅ 直接把「原始 PCM」交給 PlaybackService（它內部會包 WAV 並等待 ready）
     try {
-      await _pb.load(bytes: wavBytes, sampleRate: mix.sampleRate);
+      await _pb.load(pcmS16: mix.pcmS16, sampleRate: mix.sampleRate);
     } catch (e) {
       debugPrint('Playback load failed: $e');
       rethrow;
@@ -504,5 +513,149 @@ class MainEditorService extends ChangeNotifier {
     // PCM payload
     out.setRange(44, 44 + dataLen, pcmS16le);
     return out;
+  }
+
+  // ===== 離線匯出（產出暫存檔）=====
+  Future<String> exportMix({
+    required AudioExportFormat format,
+    int bitrateKbps = 192,
+    String? suggestFileName,
+  }) async {
+    // 確保 master 重新混音到最新
+    await _rebuildMasterAndLoad();
+    if (_masterPcmBytes == null || _masterSampleRate == null) {
+      throw StateError('沒有可匯出的混音內容。');
+    }
+
+    final tmpDir = await getTemporaryDirectory();
+    final base = (suggestFileName == null || suggestFileName.trim().isEmpty)
+        ? 'clipnote_${DateTime.now().millisecondsSinceEpoch}'
+        : suggestFileName.trim();
+
+    final wavPath = '${tmpDir.path}/$base-master.wav';
+    final outPath = switch (format) {
+      AudioExportFormat.wav => '${tmpDir.path}/$base.wav',
+      AudioExportFormat.mp3 => '${tmpDir.path}/$base.mp3',
+      AudioExportFormat.m4a => '${tmpDir.path}/$base.m4a',
+    };
+
+    // 先寫暫存 WAV（單聲道 s16）
+    final wavBytes = _pcmS16MonoToWav(_masterPcmBytes!, _masterSampleRate!);
+    await File(wavPath).writeAsBytes(wavBytes, flush: true);
+
+    // WAV 直接用
+    if (format == AudioExportFormat.wav) {
+      await File(outPath).writeAsBytes(wavBytes, flush: true);
+      try {
+        await File(wavPath).delete();
+      } catch (_) {}
+      return outPath;
+    }
+
+    // 用 FFmpeg 轉 AAC(M4A) 或 MP3
+    final sr = _masterSampleRate!;
+    final cmd = (format == AudioExportFormat.m4a)
+        ? '-y -i "$wavPath" -vn -ac 1 -ar $sr -c:a aac -b:a ${bitrateKbps}k -movflags +faststart "$outPath"'
+        : '-y -i "$wavPath" -vn -ac 1 -ar $sr -c:a libmp3lame -b:a ${bitrateKbps}k "$outPath"';
+
+    final session = await FFmpegKit.execute(cmd);
+    final rc = await session.getReturnCode();
+
+    // MP3 可能因缺 libmp3lame 失敗 → 直接提示改用 M4A
+    if (!ReturnCode.isSuccess(rc)) {
+      final logs = (await session.getAllLogs())
+          .map((l) => l.getMessage())
+          .join('\n')
+          .toLowerCase();
+      if (format == AudioExportFormat.mp3 &&
+          (logs.contains('unknown encoder \'libmp3lame\'') ||
+              logs.contains('encoder (libmp3lame) not found') ||
+              logs.contains('invalid audio encoder'))) {
+        try {
+          await File(wavPath).delete();
+        } catch (_) {}
+        throw UnsupportedError('此 FFmpeg 變體未內建 MP3 編碼器 (libmp3lame)。請改匯出 M4A。');
+      }
+      try {
+        await File(wavPath).delete();
+      } catch (_) {}
+      throw Exception('FFmpeg 轉檔失敗：$rc\n$logs');
+    }
+
+    try {
+      await File(wavPath).delete();
+    } catch (_) {}
+    return outPath;
+  }
+
+  // ===== 存到「下載資料夾」：行動端 FileSaver、桌面 ~/Downloads、後備 FlutterFileDialog =====
+  Future<String> exportMixToDownloads({
+    required AudioExportFormat format,
+    int bitrateKbps = 192,
+    String? suggestFileName,
+  }) async {
+    // 先產出暫存檔（存到 app 暫存）
+    final tmpPath = await exportMix(
+      format: format,
+      bitrateKbps: bitrateKbps,
+      suggestFileName: suggestFileName,
+    );
+    final bytes = await File(tmpPath).readAsBytes();
+
+    final fm = _extAndMime(format); // 你原本的 ext/mime
+    final base = (suggestFileName == null || suggestFileName.trim().isEmpty)
+        ? 'clipnote_mix'
+        : suggestFileName.trim();
+    final displayName = '$base.${fm.ext}';
+
+    if (Platform.isAndroid) {
+      final sdk = await _androidSdkInt();
+      // API 28 以下要舊權限
+      if (sdk <= 28) {
+        final ok = await Permission.storage.request();
+        if (!ok.isGranted) throw Exception('需要儲存權限才能寫入下載資料夾');
+      }
+      final saved = await _mediaCh.invokeMethod<String>('saveToDownloads', {
+        'bytes': bytes,
+        'displayName': displayName,
+        'mime': fm.mime, // 'audio/mpeg' / 'audio/mp4' / 'audio/wav'
+        'subdir': 'ClipNote', // 會到「Download/ClipNote/」
+      });
+      try {
+        await File(tmpPath).delete();
+      } catch (_) {}
+      if (saved == null) throw Exception('寫入失敗');
+      return saved; // Android 10+ 是 content:// URI，舊機是實體路徑
+    }
+
+    // 其他平台照你既有流程（桌面 ~/Downloads；iOS 顯示存檔對話框）
+    // ...（保留你原本的分支）...
+    return tmpPath;
+  }
+
+  // 副檔名 + MIME
+  ({String ext, String mime}) _extAndMime(AudioExportFormat f) {
+    switch (f) {
+      case AudioExportFormat.mp3:
+        return (ext: 'mp3', mime: 'audio/mpeg');
+      case AudioExportFormat.m4a:
+        return (ext: 'm4a', mime: 'audio/mp4'); // 部分平台也接受 audio/aac
+      case AudioExportFormat.wav:
+        return (ext: 'wav', mime: 'audio/wav');
+    }
+  }
+
+  // 小工具：join
+  String _pJoin(String a, String b) {
+    if (a.endsWith(Platform.pathSeparator)) return '$a$b';
+    return '$a${Platform.pathSeparator}$b';
+  }
+
+  static const _mediaCh = MethodChannel('clipnote/media');
+
+  Future<int> _androidSdkInt() async {
+    if (!Platform.isAndroid) return 0;
+    final info = await DeviceInfoPlugin().androidInfo;
+    return info.version.sdkInt;
   }
 }

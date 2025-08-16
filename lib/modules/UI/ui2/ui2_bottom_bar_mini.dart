@@ -9,7 +9,7 @@ class MiniFooterBar extends StatelessWidget {
   final VoidCallback onPlayPause;
   final ValueChanged<int> onSeekMs; // 拖動短時間軸
   final VoidCallback onImport; // 匯入音檔
-  final VoidCallback onExportMp3; // 匯出 MP3
+  final VoidCallback onExport; // 匯出 MP3
 
   const MiniFooterBar({
     super.key,
@@ -19,7 +19,7 @@ class MiniFooterBar extends StatelessWidget {
     required this.onPlayPause,
     required this.onSeekMs,
     required this.onImport,
-    required this.onExportMp3,
+    required this.onExport,
   });
 
   @override
@@ -116,7 +116,7 @@ class MiniFooterBar extends StatelessWidget {
 
               // 匯出 MP3
               ElevatedButton.icon(
-                onPressed: onExportMp3,
+                onPressed: onExport,
                 style: _btnStyle(const Color(0xFF6C63FF)),
                 icon: const Icon(Icons.download_rounded, size: 18),
                 label: const Text(

@@ -133,7 +133,7 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
                         onPlayPause: svc.togglePlay,
                         onSeekMs: (ms) => svc.seekTo(ms),
                         onImport: _handleImport,
-                        onExportMp3: _handleExportMp3,
+                        onExport: _handleExport,
                       ),
                     ),
                   ),
@@ -156,10 +156,86 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
     }
   }
 
-  void _handleExportMp3() {
-    // TODO：接 FFmpegKit atrim/concat → mp3
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('匯出 MP3：TODO（FFmpegKit）')));
+  void _handleExport() async {
+    final fmt = await _chooseExportFormat(context);
+    if (fmt == null) return;
+
+    final bitrate = switch (fmt) {
+      AudioExportFormat.mp3 => 192,
+      AudioExportFormat.m4a => 192,
+      AudioExportFormat.wav => 0,
+    };
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      final where = await svc.exportMixToDownloads(
+        format: fmt,
+        bitrateKbps: bitrate,
+        suggestFileName: 'clipnote_mix',
+      );
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已匯出到下載：$where')));
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('匯出失敗：$e')));
+    }
+  }
+
+  Future<AudioExportFormat?> _chooseExportFormat(BuildContext ctx) {
+    return showModalBottomSheet<AudioExportFormat>(
+      context: ctx,
+      backgroundColor: const Color(0xFF121621),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            const Text(
+              '選擇輸出格式',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.audiotrack, color: Colors.white70),
+              title: const Text('MP3', style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, AudioExportFormat.mp3),
+            ),
+            ListTile(
+              leading: const Icon(Icons.music_note, color: Colors.white70),
+              title: const Text(
+                'M4A (AAC)',
+                style: TextStyle(color: Colors.white),
+              ),
+              onTap: () => Navigator.pop(ctx, AudioExportFormat.m4a),
+            ),
+            ListTile(
+              leading: const Icon(Icons.waves, color: Colors.white70),
+              title: const Text(
+                'WAV（無壓縮）',
+                style: TextStyle(color: Colors.white),
+              ),
+              onTap: () => Navigator.pop(ctx, AudioExportFormat.wav),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
   }
 }
