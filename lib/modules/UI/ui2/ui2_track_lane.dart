@@ -1,4 +1,5 @@
 // lib/modules/UI/ui2/ui2_track_lane.dart
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:clipnote_audio/modules/services/track_lane_service.dart';
 import 'package:flutter/material.dart';
@@ -210,6 +211,97 @@ class _TrackLaneState extends State<TrackLane> {
     await widget.laneSvc.panEnd(postSeekMs: seg.dstOffsetMs); // ★ 傳新位置
   }
 
+  Future<bool> _confirmDeleteSegment(BuildContext context, Segment seg) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('刪除此段？'),
+            content: Text(
+              '起點 ${seg.dstOffsetMs} ms、長度 ${seg.srcDurationMs} ms',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('刪除'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _onSegmentLongPressStart(
+    Segment seg,
+    LongPressStartDetails d,
+  ) async {
+    final pos = d.globalPosition;
+    final choice = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx, pos.dy),
+      items: const [
+        PopupMenuItem(value: 'here', child: Text('在此處切割')),
+        PopupMenuItem(value: 'playhead', child: Text('在播放頭切割')),
+        PopupMenuItem(value: 'delete', child: Text('刪除此段')),
+      ],
+    );
+    if (choice == null) return;
+
+    if (choice == 'delete') {
+      final ok = await _confirmDeleteSegment(context, seg);
+      if (!ok) return;
+
+      // 找到目前索引，刪除後選鄰近
+      final segs = widget.track.track.segments;
+      final idx = segs.indexOf(seg);
+
+      widget.track.removeSegment(seg);
+      // 立即刷新本軌渲染與波形 & 主混音
+      widget.track.rebuildRenderedNow();
+      widget.track.buildDownsampledWaveform(step: 128);
+      await widget.editor.rebuildMaster();
+
+      // 選取鄰近片段（若還有片段）
+      if (segs.isNotEmpty) {
+        final pick = segs[idx.clamp(0, segs.length - 1)];
+        widget.laneSvc.selectSegment(laneId: widget.laneId, segId: pick.id);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已刪除 1 段')));
+        setState(() {});
+      }
+      return;
+    }
+
+    // 其餘：切割
+    int splitMs;
+    if (choice == 'here') {
+      splitMs = (seg.dstOffsetMs + d.localPosition.dx / widget.pxPerMs).round();
+    } else {
+      splitMs = widget.editor.playheadMs;
+    }
+    final start = seg.dstOffsetMs;
+    final end = start + seg.srcDurationMs;
+    splitMs = splitMs.clamp(start + 1, end - 1);
+
+    final res = widget.track.splitSegment(seg, splitMs);
+    if (res != null && mounted) {
+      widget.track.rebuildRenderedNow();
+      widget.track.buildDownsampledWaveform(step: 128);
+      await widget.editor.rebuildMaster();
+      widget.laneSvc.selectSegment(laneId: widget.laneId, segId: res.right.id);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('已分割')));
+      setState(() {});
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final listens = Listenable.merge([
@@ -310,6 +402,8 @@ class _TrackLaneState extends State<TrackLane> {
                                       _onHorizontalDragEnd(seg, d), // ★ 傳 seg
                                   onHorizontalDragCancel: () =>
                                       _onDragCancelFor(seg), // ★ 取消也提交
+                                  onLongPressStart: (d) =>
+                                      _onSegmentLongPressStart(seg, d),
                                   child: _SegmentCard(
                                     name: widget.track.name,
                                     color: widget.track.color,

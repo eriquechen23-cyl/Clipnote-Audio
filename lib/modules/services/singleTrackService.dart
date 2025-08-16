@@ -152,6 +152,13 @@ class UnimplementedDecoder implements PcmDecoder {
   }
 }
 
+/// 分割結果：左段 + 右段
+class SplitResult {
+  final Segment left;
+  final Segment right;
+  const SplitResult(this.left, this.right);
+}
+
 /// SingleTrackService：管理一條軌的全部行為
 class SingleTrackService {
   SingleTrackService({PcmDecoder? decoder, void Function()? onChanged})
@@ -185,6 +192,9 @@ class SingleTrackService {
   // 方便 UI：0..1 線性增益讀寫
   double get trackGain01 => _dbTo01(track.trackGainDb);
   void setTrackGain01(double g01) => setTrackGainDb(_toDb(g01));
+
+  /// 避免產生 0 長度段的最小切割距離
+  static const int kMinSplitMs = 5;
 
   // Toggle 便利方法
   void toggleMute() => setMute(!isMuted);
@@ -568,5 +578,83 @@ class SingleTrackService {
     if (seg.dstOffsetMs == newDstOffsetMs) return;
     seg.dstOffsetMs = newDstOffsetMs;
     _markChanged(); // ← 同上
+  }
+
+  /// 傳回「某毫秒落在哪一段」；若無則 null
+  Segment? segmentAtMs(int ms) {
+    for (final s in track.segments) {
+      final start = s.dstOffsetMs;
+      final end = start + s.srcDurationMs;
+      if (ms >= start && ms < end) return s;
+    }
+    return null;
+  }
+
+  /// 在指定段 seg 的 splitMs（絕對時間）處切割。
+  /// clearFadesAtCut=true 會把切點處的左右段淡出/淡入清零，避免切點音量凹陷。
+  SplitResult? splitSegment(
+    Segment seg,
+    int splitMs, {
+    bool clearFadesAtCut = true,
+  }) {
+    final segStart = seg.dstOffsetMs;
+    final segEnd = segStart + seg.srcDurationMs;
+    if (segEnd <= segStart) return null;
+
+    // 夾限切點在段內
+    final cut = splitMs.clamp(segStart, segEnd);
+
+    // 靠太近邊界就不切，避免 0 長度
+    if (cut - segStart < kMinSplitMs) return null;
+    if (segEnd - cut < kMinSplitMs) return null;
+
+    // 左段長度 = cut - segStart；對應到來源的 newSrcEndLeft
+    final leftDurMs = cut - segStart;
+    final newSrcEndLeft = seg.srcStartMs + leftDurMs;
+    final newSrcStartRight = newSrcEndLeft;
+
+    // 生成左右段（先複製，再調整）
+    final left = seg.copyWith(
+      id: _genId(),
+      srcEndMs: newSrcEndLeft,
+      // right 從 cut 起接上
+      // 保留 dstOffsetMs 不變（左段起點仍在 segStart）
+      fadeOutMs: clearFadesAtCut ? 0 : seg.fadeOutMs,
+    );
+    final right = seg.copyWith(
+      id: _genId(),
+      srcStartMs: newSrcStartRight,
+      dstOffsetMs: cut,
+      fadeInMs: clearFadesAtCut ? 0 : seg.fadeInMs,
+    );
+
+    // 夾限淡入/淡出不可超過新段長
+    Segment clampFades(Segment s) {
+      final len = s.srcDurationMs;
+      return s.copyWith(
+        fadeInMs: math.min(s.fadeInMs, len),
+        fadeOutMs: math.min(s.fadeOutMs, len),
+      );
+    }
+
+    final leftFixed = clampFades(left);
+    final rightFixed = clampFades(right);
+
+    // 用左右兩段取代原段，維持時間順序
+    final idx = track.segments.indexOf(seg);
+    if (idx < 0) return null;
+    track.segments
+      ..removeAt(idx)
+      ..insertAll(idx, [leftFixed, rightFixed]);
+
+    _touch(); // 標髒並觸發 debounce 渲染
+    return SplitResult(leftFixed, rightFixed);
+  }
+
+  /// 以絕對時間 ms 找段並切割（例如播放頭）
+  SplitResult? splitAtMs(int ms, {bool clearFadesAtCut = true}) {
+    final seg = segmentAtMs(ms);
+    if (seg == null) return null;
+    return splitSegment(seg, ms, clearFadesAtCut: clearFadesAtCut);
   }
 }
