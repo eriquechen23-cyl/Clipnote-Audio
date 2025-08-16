@@ -19,6 +19,8 @@ dependencies:
   just_audio: ^0.9.39
   flutter_native_splash: ^2.4.6
   flutter_launcher_icons: ^0.14.4
+  audioplayers: ^5.2.1
+  fl_chart: ^0.69.0   # 用最新小版也行
 
 
 
