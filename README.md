@@ -2,7 +2,7 @@
 
 ![Clipnote Audio Logo](docs/images/logo.svg)
 
-![Clipnote Audio Logo](docs/images/MAIN_UI.png)
+![Clipnote Audio Logo](docs/images/NEW_UI2.png)
 
 Clipnote Audio is a Flutter-based multi-track audio editor that uses native FFmpeg decoding and a custom PCM player via FFI. It
 supports real-time mixing, spectrum analysis, and waveform editing on multiple tracks.
@@ -15,7 +15,7 @@ Clipnote Audio 是一款基於 Flutter 的多軌音訊編輯器，透過 FFI 呼
 - Import MP3/M4A/WAV/AAC files with the built-in file picker / 透過檔案選取器匯入 MP3、M4A、WAV、AAC 音訊
 - Drag tracks on the timeline, long‑press to trim segments / 在時間軸上拖曳音軌並長按剪裁區段
 - Adjustable per‑segment fade in/out / 每段音訊可調整淡入淡出
-- Unified play/pause preview and real‑time spectrum analysis (200 ms FFT) / 統一播放/暫停預覽並每33 毫秒進行 FFT 頻譜分析
+- Unified play/pause preview and real‑time spectrum analysis (200 ms FFT) / 統一播放/暫停預覽並每 33 毫秒進行 FFT 頻譜分析
 - Mix down multiple tracks and export the result as a 16‑bit WAV file / 將多軌混音並匯出為 16 位元 WAV
 - FFI wrappers for FFmpeg decoding and a native PCM audio player / 使用 FFI 包裝 FFmpeg 解碼與原生 PCM 播放器
 - Timeline ruler and per‑track delete controls / 具時間尺標與單軌刪除控制
