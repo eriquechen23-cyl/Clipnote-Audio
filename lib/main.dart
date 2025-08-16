@@ -1,9 +1,8 @@
 import 'dart:async';
+import 'package:clipnote_audio/modules/UI/mainEditorUI2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
-
-import 'package:clipnote_audio/modules/editing/multitrack_editor.dart';
 
 void main() async {
   // 原生 Splash 交接
@@ -60,7 +59,7 @@ class _FullBleedSplashState extends State<_FullBleedSplash> {
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
         transitionDuration: const Duration(milliseconds: 280),
-        pageBuilder: (_, __, ___) => const MultiTrackEditor(),
+        pageBuilder: (_, __, ___) => const MainEditorUI2(),
         transitionsBuilder: (_, a, __, child) =>
             FadeTransition(opacity: a, child: child),
       ),
