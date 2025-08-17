@@ -2,7 +2,7 @@
 
 ![Clipnote Audio Logo](docs/images/logo.svg)
 
-![Clipnote Audio Logo](docs/images/NEW_UI2.png)
+![Clipnote Audio Logo](docs/images/UI3.png)
 
 Clipnote Audio is a Flutter-based multi-track audio editor that uses native FFmpeg decoding and a custom PCM player via FFI. It
 supports real-time mixing, spectrum analysis, and waveform editing on multiple tracks.
