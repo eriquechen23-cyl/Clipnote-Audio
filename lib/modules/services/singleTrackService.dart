@@ -18,6 +18,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:clipnote_audio/modules/waveform/envelope.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:ui' show Color;
 
@@ -117,6 +118,20 @@ class SingleTrack with ChangeNotifier {
   // 渲染後 PCM（mono s16le）
   Int16List _rendered = Int16List(0);
   Int16List get renderedPcm => _rendered;
+
+  // 多層封包（min/max）快取：key = stepSamples
+  final Map<int, EnvelopeLevel> envelopes = {};
+  // 推薦步階（以 samples 為單位；可依需求調整）
+  static const List<int> envelopeSteps = [
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+  ];
 
   // 建構子：給預設名稱與依 id 穩定取色
   SingleTrack(this.id)
@@ -449,6 +464,10 @@ class SingleTrackService {
     }
 
     track._rendered = out;
+    track.downsampledPcmPeak = const []; // 舊峰值可清空或保留
+    track.downsampleStep = kDefaultDownsampleStep;
+    track.envelopes.clear(); // ★ 失效舊封包
+
     track.isDirty.value = false;
     _markChanged();
   }
@@ -656,5 +675,77 @@ class SingleTrackService {
     final seg = segmentAtMs(ms);
     if (seg == null) return null;
     return splitSegment(seg, ms, clearFadesAtCut: clearFadesAtCut);
+  }
+
+  // 依 pxPerMs 選一層最接近「1px 寬」的封包（stepMs * pxPerMs ≈ 1）
+  EnvelopeLevel? pickEnvelopeForPxPerMs(double pxPerMs) {
+    final sr = 48000; // 你專案內部統一 48k
+    if (track.envelopes.isEmpty) return null;
+    EnvelopeLevel? best;
+    double bestDiff = 1e9;
+    for (final e in track.envelopes.values) {
+      final px = e.stepMs * pxPerMs;
+      final d = (px - 1.0).abs();
+      if (d < bestDiff) {
+        bestDiff = d;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  // 確保指定 stepSamples 的封包存在；沒有就建（Isolate）
+  Future<void> ensureEnvelopeLevel(int stepSamples) async {
+    if (track.envelopes.containsKey(stepSamples)) return;
+    final pcm = track.renderedPcm;
+    if (pcm.isEmpty) {
+      track.envelopes[stepSamples] = EnvelopeLevel(
+        sampleRate: 48000,
+        stepSamples: 1,
+        minVals: Int16List(0),
+        maxVals: Int16List(0),
+      );
+      _markChanged();
+      return;
+    }
+    final env = await buildEnvelopeLevelIsolate(
+      pcm: pcm,
+      sampleRate: 48000,
+      stepSamples: stepSamples,
+    );
+    track.envelopes[stepSamples] = env;
+    _markChanged();
+  }
+
+  // 預熱幾個常用層
+  Future<void> prewarmEnvelopes() async {
+    for (final s in SingleTrack.envelopeSteps) {
+      // 依序建，避免同時太多 Isolate（你也可併發 2~3 個）
+      await ensureEnvelopeLevel(s);
+    }
+  }
+
+  // 當渲染後 PCM 改變時，清空舊封包
+  void _invalidateEnvelopes() {
+    track.envelopes.clear();
+  }
+
+  // 根據當前縮放預先建一層（避免首次放大時卡頓）
+  Future<void> ensureEnvelopeForPxPerMs(double pxPerMs) async {
+    // 算出目標 stepSamples
+    final sr = 48000;
+    // 讓 stepMs ≈ 1/pxPerMs（每 1px 一個 bucket）
+    final targetStepMs = (1.0 / pxPerMs).clamp(1.0, 5000.0); // 1ms ~ 5s
+    int best = SingleTrack.envelopeSteps.first;
+    double bestDiff = 1e9;
+    for (final s in SingleTrack.envelopeSteps) {
+      final stepMs = (s * 1000.0) / sr;
+      final d = (stepMs - targetStepMs).abs();
+      if (d < bestDiff) {
+        bestDiff = d;
+        best = s;
+      }
+    }
+    await ensureEnvelopeLevel(best);
   }
 }

@@ -2,6 +2,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:clipnote_audio/modules/services/track_lane_service.dart';
+import 'package:clipnote_audio/modules/waveform/envelope.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart'; // Alt 切換磁吸（桌面）
@@ -56,16 +58,44 @@ class _TrackLaneState extends State<TrackLane> {
   // Alt 臨時關閉磁吸 + 鎖捲動
   bool _snapOn = true;
   bool _scrollLocked = false; // ★ 拖曳期間關閉水平滾動，避免手勢被 ScrollView 搶走
-
+  final ValueNotifier<double> _scrollLeftPx = ValueNotifier(0);
   @override
   void initState() {
     super.initState();
+    // 監聽自動追隨（原本就有的）
     if (widget.autoFollow) {
       widget.editor.playhead.addListener(_maybeAutoFollow);
       widget.editor.playing.addListener(_maybeAutoFollow);
       widget.track.track.addListener(_maybeAutoFollow);
     }
-    RawKeyboard.instance.addListener(_onKey); // Alt 切換磁吸
+    RawKeyboard.instance.addListener(_onKey);
+
+    // ★ 監聽水平滾動 → 更新 _scrollLeftPx
+    _sc.addListener(_onScrollChanged);
+    // 初始值
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_sc.hasClients) _scrollLeftPx.value = _sc.position.pixels;
+    });
+  }
+
+  void _onScrollChanged() {
+    if (!_sc.hasClients) return;
+    _scrollLeftPx.value = _sc.position.pixels;
+  }
+
+  @override
+  void dispose() {
+    if (widget.autoFollow) {
+      widget.editor.playhead.removeListener(_maybeAutoFollow);
+      widget.editor.playing.removeListener(_maybeAutoFollow);
+      widget.track.track.removeListener(_maybeAutoFollow);
+    }
+    RawKeyboard.instance.removeListener(_onKey);
+    _sc.removeListener(_onScrollChanged); // ★ 解除
+    _scrollLeftPx.dispose(); // ★ 釋放
+    _ownSc.dispose();
+    super.dispose();
   }
 
   @override
@@ -116,18 +146,6 @@ class _TrackLaneState extends State<TrackLane> {
       widget.editor.playing.removeListener(_maybeAutoFollow);
       widget.track.track.removeListener(_maybeAutoFollow);
     }
-  }
-
-  @override
-  void dispose() {
-    if (widget.autoFollow) {
-      widget.editor.playhead.removeListener(_maybeAutoFollow);
-      widget.editor.playing.removeListener(_maybeAutoFollow);
-      widget.track.track.removeListener(_maybeAutoFollow);
-    }
-    RawKeyboard.instance.removeListener(_onKey);
-    _ownSc.dispose();
-    super.dispose();
   }
 
   // === 工具 ===
@@ -348,6 +366,17 @@ class _TrackLaneState extends State<TrackLane> {
         _viewportWidth = constraints.maxWidth;
         WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoFollow());
 
+        // === 只畫視窗：算出目前可視區間 ===
+        final double leftPx = _sc.hasClients ? _sc.position.pixels : 0.0;
+        final double viewWidthPx = constraints.maxWidth;
+        final int viewMsStart = (leftPx / widget.pxPerMs).floor();
+        final int viewMsEnd =
+            viewMsStart + (viewWidthPx / widget.pxPerMs).ceil();
+
+        // 啟動一次非阻塞的封包確保（避免首次縮放/捲動卡頓）
+        unawaited(widget.track.ensureEnvelopeForPxPerMs(widget.pxPerMs));
+        // 拿到最接近 1px 一柱的封包層
+        final env = widget.track.pickEnvelopeForPxPerMs(widget.pxPerMs);
         return ClipRRect(
           borderRadius: BorderRadius.circular(10),
           child: Container(
@@ -391,19 +420,34 @@ class _TrackLaneState extends State<TrackLane> {
                             ),
                           ),
                           // 1) 背景網格
+                          // 1) 背景網格（動態刻度 + 只畫可視區間）
                           CustomPaint(
                             size: Size(laneWidth, double.infinity),
-                            painter: _GridPainter(pxPerMs: widget.pxPerMs),
-                          ),
-                          // 2) 波形
-                          CustomPaint(
-                            size: Size(laneWidth, double.infinity),
-                            painter: _WaveformPainter(
-                              peaks: widget.track.track.downsampledPcmPeak,
-                              stepSamples: widget.track.track.downsampleStep,
+                            painter: _GridPainterWindow(
                               pxPerMs: widget.pxPerMs,
+                              scrollLeftPx: _scrollLeftPx,
+                              viewportWidthPx: _viewportWidth,
                             ),
                           ),
+
+                          // 2) 波形
+                          // 2) 波形（只畫可視區間；滾動時自動 repaint）
+                          CustomPaint(
+                            size: Size(laneWidth, double.infinity),
+                            painter: _WaveformWindowPainter(
+                              env: widget.track.pickEnvelopeForPxPerMs(
+                                widget.pxPerMs,
+                              ),
+                              fallbackPeaks:
+                                  widget.track.track.downsampledPcmPeak,
+                              fallbackStepSamples:
+                                  widget.track.track.downsampleStep,
+                              pxPerMs: widget.pxPerMs,
+                              scrollLeftPx: _scrollLeftPx, // ★
+                              viewportWidthPx: _viewportWidth, // ★
+                            ),
+                          ),
+
                           // 3) 片段
                           ...widget.track.track.segments.map((seg) {
                             final x = ms2x(seg.dstOffsetMs);
@@ -603,24 +647,92 @@ class _FadeTrianglePainter extends CustomPainter {
       old.color != color || old.leftToRight != leftToRight;
 }
 
-class _GridPainter extends CustomPainter {
+class _GridPainterWindow extends CustomPainter {
   final double pxPerMs;
-  _GridPainter({required this.pxPerMs});
+  final ValueListenable<double> scrollLeftPx; // ← 用於滑動即時重繪
+  final double viewportWidthPx;
+
+  _GridPainterWindow({
+    required this.pxPerMs,
+    required this.scrollLeftPx,
+    required this.viewportWidthPx,
+  }) : super(repaint: scrollLeftPx);
+
+  // 推薦的時間刻度（毫秒）
+  static const List<int> _niceStepsMs = [
+    // 毫秒
+    1, 2, 5, 10, 20, 50, 100, 200, 500,
+    // 秒
+    1000, 2000, 5000, 10000, 15000, 30000,
+    // 分
+    60000, 120000, 300000, 600000, 1800000,
+    // 小時
+    3600000,
+  ];
+
+  // 依目前縮放挑一個「看起來舒服」的 major 刻度，目標線距 ~ 120px
+  static int _pickMajorMs(double pxPerMs, double viewportWidthPx) {
+    const desiredPx = 120.0;
+    for (final s in _niceStepsMs) {
+      if (s * pxPerMs >= desiredPx) return s;
+    }
+    return _niceStepsMs.last; // 超遠視野，用最大的
+  }
+
+  // 挑 minor 刻度，確保線距 ≥ 18px，否則就不要 minor
+  static int? _pickMinorMs(int majorMs, double pxPerMs) {
+    const minMinorPx = 18.0;
+    // 優先 1/6、1/5、1/4、1/2
+    for (final div in [6, 5, 4, 2]) {
+      if ((majorMs / div) * pxPerMs >= minMinorPx) {
+        return (majorMs / div).round();
+      }
+    }
+    return null; // 太擠就不畫 minor
+  }
 
   @override
   void paint(Canvas c, Size s) {
-    final pMinor = Paint()..color = const Color(0x22FFFFFF);
-    final pMajor = Paint()..color = const Color(0x44FFFFFF);
-    for (double x = 0; x < s.width; x += 100 * pxPerMs) {
-      c.drawLine(Offset(x, 0), Offset(x, s.height), pMinor);
+    final leftPx = scrollLeftPx.value;
+    final viewMsStart = (leftPx / pxPerMs).floor();
+    final viewMsEnd = viewMsStart + (viewportWidthPx / pxPerMs).ceil();
+
+    final majorMs = _pickMajorMs(pxPerMs, viewportWidthPx);
+    final minorMs = _pickMinorMs(majorMs, pxPerMs);
+
+    final pMinor = Paint()
+      ..color = const Color(0x22FFFFFF)
+      ..strokeWidth = 1;
+    final pMajor = Paint()
+      ..color = const Color(0x44FFFFFF)
+      ..strokeWidth = 1.25;
+
+    // 畫 minor（若有）
+    if (minorMs != null) {
+      final startMinor = (viewMsStart ~/ minorMs) * minorMs;
+      for (int t = startMinor; t <= viewMsEnd; t += minorMs) {
+        // 避免畫到 major 的位置（讓 major 蓋上去）
+        if (t % majorMs == 0) continue;
+        final x = t * pxPerMs;
+        if (x < leftPx - 2 || x > leftPx + viewportWidthPx + 2) continue;
+        c.drawLine(Offset(x, 0), Offset(x, s.height), pMinor);
+      }
     }
-    for (double x = 0; x < s.width; x += 1000 * pxPerMs) {
+
+    // 畫 major
+    final startMajor = (viewMsStart ~/ majorMs) * majorMs;
+    for (int t = startMajor; t <= viewMsEnd; t += majorMs) {
+      final x = t * pxPerMs;
+      if (x < leftPx - 2 || x > leftPx + viewportWidthPx + 2) continue;
       c.drawLine(Offset(x, 0), Offset(x, s.height), pMajor);
     }
   }
 
   @override
-  bool shouldRepaint(covariant _GridPainter old) => old.pxPerMs != pxPerMs;
+  bool shouldRepaint(covariant _GridPainterWindow old) =>
+      old.pxPerMs != pxPerMs ||
+      old.viewportWidthPx != viewportWidthPx ||
+      old.scrollLeftPx != scrollLeftPx;
 }
 
 class _WaveformPainter extends CustomPainter {
@@ -688,4 +800,90 @@ class _WaveformPainter extends CustomPainter {
       old.peaks != peaks ||
       old.stepSamples != stepSamples ||
       old.pxPerMs != pxPerMs;
+}
+
+class _WaveformWindowPainter extends CustomPainter {
+  final EnvelopeLevel? env; // min/max 封包
+  final List<int> fallbackPeaks; // 舊峰值
+  final int fallbackStepSamples;
+  final double pxPerMs;
+
+  // ★ 新增：由畫家直接讀目前滾動位移與視窗寬（像素）
+  final ValueListenable<double> scrollLeftPx;
+  final double viewportWidthPx;
+
+  _WaveformWindowPainter({
+    required this.env,
+    required this.fallbackPeaks,
+    required this.fallbackStepSamples,
+    required this.pxPerMs,
+    required this.scrollLeftPx, // <—
+    required this.viewportWidthPx, // <—
+  }) : super(repaint: scrollLeftPx); // ★ 關鍵：滾動就 repaint
+
+  @override
+  void paint(Canvas c, Size s) {
+    c.clipRect(Offset.zero & s);
+
+    // 由滾動位移推導目前的可視毫秒區間
+    final leftPx = scrollLeftPx.value;
+    final int viewMsStart = (leftPx / pxPerMs).floor();
+    final int viewMsEnd = viewMsStart + (viewportWidthPx / pxPerMs).ceil();
+
+    final midY = s.height / 2;
+    final ampY = (s.height * 0.44);
+
+    if (env != null && env!.length > 0) {
+      final e = env!;
+      final i0 = e.indexFromMs(viewMsStart);
+      final i1 = e.indexFromMs(viewMsEnd);
+      final paint = Paint()
+        ..strokeWidth = 1.0
+        ..color = const Color(0xFF94A3B8);
+
+      for (int i = i0; i <= i1 && i < e.length; i++) {
+        final x = e.msAt(i) * pxPerMs; // 絕對座標（不要扣 viewMsStart）
+        if (x < leftPx - 2 || x > leftPx + viewportWidthPx + 2) continue; // 小快篩
+        final vMin = (e.minVals[i] / 32768.0).clamp(-1.0, 1.0);
+        final vMax = (e.maxVals[i] / 32768.0).clamp(-1.0, 1.0);
+        final y1 = midY - vMax * ampY;
+        final y2 = midY - vMin * ampY;
+        c.drawLine(Offset(x, y1), Offset(x, y2), paint);
+      }
+      return;
+    }
+
+    // 回退：舊 peaks
+    final step = math.max(1, fallbackStepSamples);
+    const sr = 48000;
+    int indexFromMs(int ms) => (((ms * sr) ~/ 1000) ~/ step).clamp(
+      0,
+      math.max(0, fallbackPeaks.length - 1),
+    );
+    int msAt(int idx) => ((idx * step) * 1000) ~/ sr;
+
+    final i0 = indexFromMs(viewMsStart);
+    final i1 = indexFromMs(viewMsEnd);
+    final paint = Paint()
+      ..strokeWidth = 1.0
+      ..color = const Color(0xFF8B9CB8);
+
+    for (int i = i0; i <= i1 && i < fallbackPeaks.length; i++) {
+      final x = msAt(i) * pxPerMs; // 絕對座標
+      if (x < leftPx - 2 || x > leftPx + viewportWidthPx + 2) continue;
+      final p = (fallbackPeaks[i] / 32768.0).clamp(0.0, 1.0);
+      final y1 = midY - p * ampY;
+      final y2 = midY + p * ampY;
+      c.drawLine(Offset(x, y1), Offset(x, y2), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _WaveformWindowPainter old) =>
+      old.env != env ||
+      old.fallbackPeaks != fallbackPeaks ||
+      old.fallbackStepSamples != fallbackStepSamples ||
+      old.pxPerMs != pxPerMs ||
+      old.viewportWidthPx != viewportWidthPx ||
+      old.scrollLeftPx != scrollLeftPx; // repaint 已處理滾動值
 }
