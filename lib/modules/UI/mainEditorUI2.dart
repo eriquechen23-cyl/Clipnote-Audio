@@ -1,3 +1,4 @@
+import 'package:clipnote_audio/modules/services/track_lane_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:clipnote_audio/modules/services/mainEditorService.dart';
@@ -18,19 +19,47 @@ class MainEditorUI2 extends StatefulWidget {
 
 class _MainEditorUI2State extends State<MainEditorUI2> {
   late final MainEditorService svc;
-
+  late final TrackLaneService laneSvc; // ★ 新增
   static const double _outerPad = 12;
 
   // 時間軸縮放（TracksPage 用）
   double _pxPerMs = 0.20;
-
+  double _rightViewportWidthPx = 0; // 由 LayoutBuilder 寫入
   @override
   void initState() {
     super.initState();
     svc = MainEditorService();
     // ignore: discarded_futures
+    laneSvc = TrackLaneService(svc); // ★ 綁定 editor
     svc.initAsync();
     _lockLandscape();
+  }
+
+  TimelineScale _nearestScale() {
+    final vw = _rightViewportWidthPx > 0 ? _rightViewportWidthPx : 1.0;
+    final windowMs = (vw / _pxPerMs).round();
+    return nearestScaleForWindowMs(windowMs);
+  }
+
+  // —— 計算右側「可見編輯區」的寬度（px）——
+  // 要跟 TracksPage 的常數同步：_listPadL/_listPadR/_headerW/_gutterW
+  double _rightViewportWidth(BuildContext ctx) {
+    final w = MediaQuery.of(ctx).size.width;
+    const listPadL = 12.0;
+    const listPadR = 12.0;
+    const headerW = 280.0;
+    const gutterW = 8.0;
+    return w - 2 * _outerPad - listPadL - listPadR - headerW - gutterW;
+  }
+
+  // 套用縮放（以「可見寬度」換算新的 _pxPerMs）
+  // 這個最小版不處理「以播放頭為錨捲動」，先能切再說；在播放中自動追隨會補上視覺位置。
+  void _applyScale(TimelineScale s) {
+    final vw = _rightViewportWidthPx > 0 ? _rightViewportWidthPx : 1.0;
+    final newPxPerMs = vw / s.windowMs;
+    if ((newPxPerMs - _pxPerMs).abs() > 1e-6) {
+      setState(() => _pxPerMs = newPxPerMs); // ★ 觸發重建
+    }
   }
 
   Future<void> _lockLandscape() async {
@@ -97,19 +126,38 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
                       padding: const EdgeInsets.symmetric(
                         horizontal: _outerPad,
                       ),
-                      child: AnimatedBuilder(
-                        animation: svc,
-                        builder: (context, _) {
-                          return TracksPage(
-                            tracks: svc.tracks,
-                            onReorder: svc.reorderTracks,
-                            onDeleteTrack: (i) => svc.removeTrackAt(i),
-                            durationMs: svc.durationMs,
-                            onSeekMs: svc.seekTo,
-                            // ★ 播放時鎖編輯
-                            canEdit: !svc.isPlaying,
-                            editor: svc,
-                            pxPerMs: _pxPerMs,
+                      child: LayoutBuilder(
+                        builder: (context, c) {
+                          // 左欄固定寬 + 內距要扣掉
+                          const headerW = 280.0;
+                          const listPadL = 12.0;
+                          const listPadR = 12.0;
+                          const gutterW = 8.0;
+
+                          final rightW =
+                              c.maxWidth -
+                              listPadL -
+                              listPadR -
+                              headerW -
+                              gutterW;
+                          if ((rightW - _rightViewportWidthPx).abs() > 0.5) {
+                            _rightViewportWidthPx = rightW; // ★ 記下真寬
+                          }
+
+                          return AnimatedBuilder(
+                            animation: svc,
+                            builder: (context, _) {
+                              return TracksPage(
+                                tracks: svc.tracks,
+                                onReorder: svc.reorderTracks,
+                                onDeleteTrack: (i) => svc.removeTrackAt(i),
+                                durationMs: svc.durationMs,
+                                onSeekMs: svc.seekTo,
+                                canEdit: !svc.isPlaying,
+                                editor: svc,
+                                pxPerMs: _pxPerMs,
+                              );
+                            },
                           );
                         },
                       ),
@@ -134,6 +182,8 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
                         onSeekMs: (ms) => svc.seekTo(ms),
                         onImport: _handleImport,
                         onExport: _handleExport,
+                        currentScale: _nearestScale(),
+                        onSetScale: _applyScale,
                       ),
                     ),
                   ),
