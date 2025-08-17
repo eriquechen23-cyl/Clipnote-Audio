@@ -71,13 +71,42 @@ class _TrackLaneState extends State<TrackLane> {
   @override
   void didUpdateWidget(covariant TrackLane oldWidget) {
     super.didUpdateWidget(oldWidget);
+
+    // ✅ 當縮放變動（pxPerMs 改變）時，讓視窗仍然對準「原本畫面裡的播放頭位置」
+    // 也可以改成「固定讓播放頭落在 35% 視窗處」（下面備註有替代寫法）
+    if (oldWidget.pxPerMs != widget.pxPerMs &&
+        _sc.hasClients &&
+        _viewportWidth > 0) {
+      final oldLeft = _sc.position.pixels;
+
+      // 播放頭在「舊縮放下」的世界座標（px）
+      final phXOld = oldWidget.pxPerMs * widget.editor.playheadMs;
+      // 播放頭相對於視窗左側的像素位置（保持這個位置不變）
+      final phInViewPx = phXOld - oldLeft;
+
+      // 播放頭在「新縮放下」的世界座標（px）
+      final phXNew = widget.pxPerMs * widget.editor.playheadMs;
+
+      // 新內容寬
+      final laneWidthNew = widget.pxPerMs * _laneMs + 40;
+      final maxScroll = math.max(0.0, laneWidthNew - _viewportWidth);
+
+      // 目標左邊界 = 讓播放頭維持在原畫面相對位置
+      double newLeft = phXNew - phInViewPx;
+      newLeft = newLeft.clamp(0.0, maxScroll);
+
+      // 立刻套用（避免動畫暈眩；你也能改 animateTo）
+      _sc.jumpTo(newLeft);
+    }
+
+    // 原本就有的自動追隨排程（保留）
     if (widget.autoFollow &&
         (oldWidget.pxPerMs != widget.pxPerMs ||
             oldWidget.durationMs != widget.durationMs)) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoFollow());
     }
 
-    // 由不追隨 → 追隨：補上監聽；反之則移除
+    // 由不追隨 → 追隨：補上監聽；反之則移除（保留你原來的）
     if (!oldWidget.autoFollow && widget.autoFollow) {
       widget.editor.playhead.addListener(_maybeAutoFollow);
       widget.editor.playing.addListener(_maybeAutoFollow);

@@ -1,5 +1,12 @@
 import 'dart:ui' show FontFeature, ImageFilter;
 import 'package:flutter/material.dart';
+import 'package:clipnote_audio/modules/services/track_lane_service.dart'
+    show TimelineScale, TimelineScaleX, kTimelineScaleOrder;
+
+import 'dart:ui' show FontFeature, ImageFilter;
+import 'package:flutter/material.dart';
+import 'package:clipnote_audio/modules/services/track_lane_service.dart'
+    show TimelineScale, TimelineScaleX;
 
 class MiniFooterBar extends StatelessWidget {
   final bool isPlaying;
@@ -10,6 +17,9 @@ class MiniFooterBar extends StatelessWidget {
   final ValueChanged<int> onSeekMs; // 拖動短時間軸
   final VoidCallback onImport; // 匯入音檔
   final VoidCallback onExport; // 匯出 MP3
+  // ★ 新增：縮放
+  final TimelineScale currentScale;
+  final ValueChanged<TimelineScale> onSetScale;
 
   const MiniFooterBar({
     super.key,
@@ -20,6 +30,8 @@ class MiniFooterBar extends StatelessWidget {
     required this.onSeekMs,
     required this.onImport,
     required this.onExport,
+    required this.currentScale, // ★ 新增
+    required this.onSetScale, // ★ 新增
   });
 
   @override
@@ -43,7 +55,6 @@ class MiniFooterBar extends StatelessWidget {
                   vertical: 12,
                 ),
                 decoration: BoxDecoration(
-                  // 深色到更深色的小漸層，提對比
                   gradient: const LinearGradient(
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
@@ -76,7 +87,7 @@ class MiniFooterBar extends StatelessWidget {
 
                     const SizedBox(width: 10),
 
-                    // 播放/暫停（圓形霓虹）
+                    // 播放/暫停
                     NeonRoundButton(
                       onPressed: onPlayPause,
                       icon: isPlaying
@@ -117,14 +128,25 @@ class MiniFooterBar extends StatelessWidget {
 
                     const SizedBox(width: 12),
 
-                    // 時間 / 總長（高對比資訊晶片）
-                    _NeonInfoChip(label: '時間', ms: positionMs),
-                    const SizedBox(width: 8),
-                    _NeonInfoChip(label: '總長', ms: durationMs),
+                    // 時間（上）/ 總長（下）上下排列
+                    _TimeStack(
+                      topLabel: '時間',
+                      topMs: positionMs,
+                      bottomLabel: '總長',
+                      bottomMs: durationMs,
+                    ),
 
                     const SizedBox(width: 12),
                     _DividerV(),
                     const SizedBox(width: 12),
+
+                    // ★ 縮放選單按鈕
+                    _ScaleMenuButton(
+                      current: currentScale,
+                      onSelected: onSetScale,
+                    ),
+
+                    const SizedBox(width: 10),
 
                     // 匯出
                     NeonButton(
@@ -144,13 +166,98 @@ class MiniFooterBar extends StatelessWidget {
   }
 }
 
+/// 兩行時間資訊（上：目前、下：總長）
+class _TimeStack extends StatelessWidget {
+  final String topLabel;
+  final int topMs;
+  final String bottomLabel;
+  final int bottomMs;
+
+  const _TimeStack({
+    required this.topLabel,
+    required this.topMs,
+    required this.bottomLabel,
+    required this.bottomMs,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        _NeonInfoChip(label: topLabel, ms: topMs),
+        const SizedBox(height: 6),
+        _NeonInfoChip(label: bottomLabel, ms: bottomMs),
+      ],
+    );
+  }
+}
+
+class _ScaleMenuButton extends StatelessWidget {
+  final TimelineScale current;
+  final ValueChanged<TimelineScale> onSelected;
+  const _ScaleMenuButton({required this.current, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<TimelineScale>(
+      tooltip: '時間軸縮放',
+      offset: const Offset(0, -8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      color: const Color(0xFF151A22),
+      onSelected: onSelected,
+      itemBuilder: (_) => [
+        for (final s in kTimelineScaleOrder) _item(s, s.label, current),
+      ],
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: const Color(0x3322D3EE),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0x3341D9FF)),
+        ),
+        child: const Icon(
+          Icons.zoom_in_map_rounded,
+          color: Colors.white,
+          size: 18,
+        ),
+      ),
+    );
+  }
+
+  PopupMenuItem<TimelineScale> _item(
+    TimelineScale v,
+    String label,
+    TimelineScale cur,
+  ) {
+    final selected = v == cur;
+    return PopupMenuItem<TimelineScale>(
+      value: v,
+      child: Row(
+        children: [
+          Icon(
+            selected
+                ? Icons.radio_button_checked
+                : Icons.radio_button_unchecked,
+            size: 18,
+            color: selected ? const Color(0xFF22D3EE) : Colors.white70,
+          ),
+          const SizedBox(width: 8),
+          Text(label, style: const TextStyle(color: Colors.white)),
+        ],
+      ),
+    );
+  }
+}
+
 /// ————— 霓虹按鈕（矩形） —————
 class NeonButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final Color baseColor;
   final VoidCallback onPressed;
-
   const NeonButton({
     super.key,
     required this.icon,
@@ -173,13 +280,7 @@ class NeonButton extends StatelessWidget {
           decoration: BoxDecoration(
             gradient: LinearGradient(colors: [c1, c2]),
             borderRadius: BorderRadius.circular(14),
-            boxShadow: [
-              BoxShadow(
-                color: c1.withOpacity(0.45),
-                blurRadius: 18,
-                spreadRadius: 0,
-              ),
-            ],
+            boxShadow: [BoxShadow(color: c1.withOpacity(0.45), blurRadius: 18)],
           ),
           child: Row(
             children: [
@@ -239,11 +340,7 @@ class NeonRoundButton extends StatelessWidget {
             shape: BoxShape.circle,
             gradient: LinearGradient(colors: colors),
             boxShadow: [
-              BoxShadow(
-                color: colors.first.withOpacity(0.45),
-                blurRadius: 22,
-                spreadRadius: 0,
-              ),
+              BoxShadow(color: colors.first.withOpacity(0.45), blurRadius: 22),
             ],
           ),
           child: Icon(icon, size: 26, color: Colors.white),
@@ -312,8 +409,8 @@ class _DividerV extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     width: 1,
     height: 44,
-    decoration: BoxDecoration(
-      gradient: const LinearGradient(
+    decoration: const BoxDecoration(
+      gradient: LinearGradient(
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
         colors: [Color(0x1126C6FF), Color(0x4426C6FF), Color(0x1126C6FF)],

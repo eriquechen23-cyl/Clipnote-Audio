@@ -78,6 +78,20 @@ class MainEditorService extends ChangeNotifier {
   static const double _gainDbMin = -60.0;
   static const double _gainDbMax = 0.0;
 
+  // —— A/V 補償（毫秒）：UI 顯示用「實際聽到」時間 ——
+  // 你可依裝置微調，先給 80ms 常見值
+  int _avOffsetMs = 80;
+  int get avOffsetMs => _avOffsetMs;
+  set avOffsetMs(int v) => _avOffsetMs = v.clamp(0, 250);
+
+  // 補償後的播放頭（播放時才減去偏移；暫停就回傳原始位置）
+  int get displayPlayheadMs {
+    final p = _pb.positionMs; // 或你的播放服務目前時間
+    if (!_pb.isPlaying) return p; // 暫停不補償
+    final d = p - _avOffsetMs;
+    return d < 0 ? 0 : d;
+  }
+
   double _gain01ToDb(double g) {
     if (g <= 0.0) return _gainDbMin;
     final db = 20.0 * (math.log(g) / math.ln10);
@@ -142,10 +156,19 @@ class MainEditorService extends ChangeNotifier {
   // ===== 播放控制 =====
   Future<void> togglePlay() async {
     if (!_pb.isLoaded) await _rebuildMasterAndLoad();
+
     if (_pb.isPlaying) {
       await _pb.pause();
       playing.value = false;
     } else {
+      // ★ 在結尾就先歸零
+      final atEnd =
+          (_pb.durationMs > 0) && (_pb.positionMs >= _pb.durationMs - 5);
+      if (atEnd) {
+        await _pb.seekTo(0);
+        playhead.value = 0; // 立刻更新 UI
+      }
+
       try {
         await _pb.play();
         playing.value = true;
@@ -162,11 +185,31 @@ class MainEditorService extends ChangeNotifier {
   void _startUiTicker() {
     _uiTicker?.cancel();
     _uiTicker = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      if (!_pb.isPlaying) {
+      final pos = _pb.positionMs;
+      final dur = _pb.durationMs;
+      final ended = dur > 0 && pos >= dur - 5;
+
+      // ★ 播放結束或不是播放狀態
+      if (!_pb.isPlaying || ended) {
         _uiTicker?.cancel();
+
+        if (ended) {
+          // 自然播完：變回播放鈕並歸零
+          playing.value = false;
+          playhead.value = 0;
+          // fire-and-forget，避免 await 阻塞計時器
+          _pb.pause();
+          _pb.seekTo(0);
+        } else {
+          // 使用者按了暫停：停在當前位置
+          playing.value = false;
+          playhead.value = pos;
+        }
         return;
       }
-      playhead.value = _pb.positionMs;
+
+      // 正常播放中：更新位置與電平
+      playhead.value = pos;
       _pullSampleWindow();
     });
   }
