@@ -21,7 +21,7 @@ class TrackLaneService {
 
   bool isLaneSelected(String laneId) => selectedLaneId.value == laneId;
   bool isSegmentSelected(String segId) => selectedSegmentId.value == segId;
-
+  final ValueNotifier<double> _scrollLeftPx = ValueNotifier(0);
   void selectLane(String laneId) {
     if (selectedLaneId.value != laneId) {
       selectedLaneId.value = laneId;
