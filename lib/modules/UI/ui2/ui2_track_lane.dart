@@ -233,11 +233,12 @@ class _TrackLaneState extends State<TrackLane> {
   void _onHorizontalDragUpdate(Segment seg, DragUpdateDetails d) {
     if (!widget.canEdit || !widget.laneSvc.isDragging) return;
 
+    final snapOnNow = widget.editor.snapEnabled.value && _snapOn; // 全域 && Alt
     widget.laneSvc.panUpdate(
       localDx: d.localPosition.dx,
       pxPerMs: widget.pxPerMs,
       laneMs: _laneMs,
-      snappingEnabled: _snapOn,
+      snappingEnabled: snapOnNow,
     );
 
     widget.laneSvc.autoScrollWhileDragging(
@@ -594,21 +595,6 @@ class _TrackLaneState extends State<TrackLane> {
                                 child: Container(
                                   width: 2,
                                   color: Colors.redAccent,
-                                ),
-                              ),
-                            ),
-                          // 5) 磁吸指引線
-                          if (widget.editor.snapGuide.value != null)
-                            Positioned(
-                              left: ms2x(
-                                widget.editor.snapGuide.value!.ms,
-                              ).toDouble(),
-                              top: 0,
-                              bottom: 0,
-                              child: IgnorePointer(
-                                child: Container(
-                                  width: 1,
-                                  color: Colors.cyanAccent.withOpacity(0.7),
                                 ),
                               ),
                             ),

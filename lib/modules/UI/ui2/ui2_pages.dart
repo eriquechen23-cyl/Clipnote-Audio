@@ -1,6 +1,7 @@
 // ui2_pages.dart
 // ignore_for_file: unnecessary_this
 
+import 'package:clipnote_audio/modules/editing/snapping.dart';
 import 'package:clipnote_audio/modules/services/track_lane_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -467,6 +468,18 @@ class _TracksPageState extends State<TracksPage> {
     );
   }
 
+  // ★ 小工具：在指定 x（整頁座標）畫 1px 青色直線
+  Widget _snapLine(double left) {
+    return Positioned(
+      left: left,
+      top: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        child: Container(width: 1, color: Colors.cyanAccent.withOpacity(0.85)),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // 確保控制器數量足夠（首次 build / 匯入刪除軌）
@@ -639,7 +652,8 @@ class _TracksPageState extends State<TracksPage> {
               ),
             ),
 
-            // 公共紅線
+            // ui2_pages.dart（_TracksPageState.build 裡的 Stack）
+            /* 仍保留你的紅色播放頭 */
             Positioned(
               left: overlayLeft,
               top: 0,
@@ -647,6 +661,66 @@ class _TracksPageState extends State<TracksPage> {
               child: IgnorePointer(
                 child: Container(width: 2, color: Colors.redAccent),
               ),
+            ),
+
+            // === 磁吸導引線（跨所有軌）===
+            AnimatedBuilder(
+              animation: Listenable.merge([
+                widget.editor.snapGuide,
+                widget.editor.snapGuideOppositeMs,
+              ]),
+              builder: (context, _) {
+                final guide = widget.editor.snapGuide.value;
+                final opp = widget.editor.snapGuideOppositeMs.value;
+
+                // 只在 butt-join 才顯示
+                if (guide == null || guide.tag != 'butt') {
+                  return const SizedBox.shrink();
+                }
+
+                double _msToOverlayLeft(int ms) {
+                  final scrollX = _hGroup.offset;
+                  final worldX = _ms2x(ms).toDouble();
+                  final localX = worldX - scrollX;
+                  return _listPadL + _headerW + _gutterW + localX;
+                }
+
+                final joinLeft = _msToOverlayLeft(guide.ms);
+                final List<Widget> lines = [
+                  // 主導引線（接縫）：亮一點
+                  Positioned(
+                    left: joinLeft,
+                    top: 0,
+                    bottom: 0,
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 1,
+                        color: Colors.cyanAccent.withOpacity(0.95),
+                      ),
+                    ),
+                  ),
+                ];
+
+                if (opp != null) {
+                  final oppLeft = _msToOverlayLeft(opp);
+                  lines.add(
+                    // 對側線：淡一點
+                    Positioned(
+                      left: oppLeft,
+                      top: 0,
+                      bottom: 0,
+                      child: IgnorePointer(
+                        child: Container(
+                          width: 1,
+                          color: Colors.cyanAccent.withOpacity(0.45),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                return Stack(children: lines);
+              },
             ),
           ],
         );

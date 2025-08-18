@@ -24,6 +24,8 @@ class TrackLaneService {
   // 加在欄位區
   final ValueNotifier<bool> dragging = ValueNotifier<bool>(false);
   bool get isDragging => dragging.value; // 兼容舊用法
+
+  int? get draggingSegDurationMs => _drag?.segment.srcDurationMs;
   void selectLane(String laneId) {
     if (selectedLaneId.value != laneId) {
       selectedLaneId.value = laneId;
@@ -84,6 +86,8 @@ class TrackLaneService {
   /// onPanUpdate：進行快移與磁吸（不做混音重建）
   // lib/modules/UI/ui2/track_lane_service.dart
 
+  // lib/modules/UI/ui2/track_lane_service.dart
+
   void panUpdate({
     required double localDx,
     required double pxPerMs,
@@ -96,13 +100,13 @@ class TrackLaneService {
     final dx = localDx - ctx.startDx;
     final rawMs = (ctx.startMs + dx / pxPerMs).round().clamp(0, laneMs);
 
-    // ✅ 改成透過 Editor，會順便記錄 touchedTracks 與顯示 snap 導引線
     editor.updateInteractiveDrag(
       track: ctx.track,
       segment: ctx.segment,
       rawMs: rawMs,
       excludeId: ctx.segment.id,
       snappingEnabled: snappingEnabled,
+      pxPerMs: pxPerMs, // ★ 補上這個參數
     );
   }
 
