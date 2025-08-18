@@ -7,19 +7,44 @@
 Clipnote Audio is a Flutter-based multi-track audio editor that uses native FFmpeg decoding and a custom PCM player via FFI. It
 supports real-time mixing, spectrum analysis, and waveform editing on multiple tracks.
 
-Clipnote Audio 是一款基於 Flutter 的多軌音訊編輯器，透過 FFI 呼叫原生 FFmpeg 解碼與自製 PCM 播放器，支援即時混音、頻譜分析與多軌
-編輯。
+Clipnote Audio 一個以 Flutter 打造的多軌剪編、即時播放與匯出的輕量音訊編輯器。支援跨軌「兩端相接」磁吸、BPM/毫秒網格、拖曳時跨軌導引線、可視範圍波形繪製與批次混音。
 
 ## Features / 功能
 
-- Import MP3/M4A/WAV/AAC files with the built-in file picker / 透過檔案選取器匯入 MP3、M4A、WAV、AAC 音訊
-- Drag tracks on the timeline, long‑press to trim segments / 在時間軸上拖曳音軌並長按剪裁區段
-- Adjustable per‑segment fade in/out / 每段音訊可調整淡入淡出
-- Unified play/pause preview and real‑time spectrum analysis (200 ms FFT) / 統一播放/暫停預覽並每 33 毫秒進行 FFT 頻譜分析
-- Mix down multiple tracks and export the result as a 16‑bit WAV file / 將多軌混音並匯出為 16 位元 WAV
-- FFI wrappers for FFmpeg decoding and a native PCM audio player / 使用 FFI 包裝 FFmpeg 解碼與原生 PCM 播放器
-- Timeline ruler and per‑track delete controls / 具時間尺標與單軌刪除控制
-- Placeholder modules for reverb and volume adjustment / 提供混響與音量調整模組骨架
+特色亮點
+
+跨軌磁吸（Butt-Join）
+片段右端 ↔ 另一片段左端相接時自動吸附，並畫出跨所有音軌的青色導引線。支援：
+
+同軌相接
+
+上下不同音軌相接（重點）
+
+播放頭 / 時間網格對齊
+
+導引線（Snap Guide）
+命中目標（片段邊、播放頭、網格）即顯示全域導引線；拖離門檻即消失。
+
+動態門檻（像素手感一致）
+吸附門檻會依 pxPerMs 等比例換算，縮放後手感不飄。
+
+只畫可視範圍
+網格與波形依目前水平捲動範圍繪製，流暢可擴至長時程專案。
+
+互動期快移、釋放再重建
+拖曳中只調整目標時間（不混音），放開才重建 touched 軌與 master。
+
+BPM 或固定毫秒網格
+setGridByBpm(bpm, division) / setGridMs(stepMs) 一鍵切換。
+
+Alt 一鍵暫停磁吸（桌面）
+按住 Alt 即可暫時關閉磁吸，精調位置更方便。
+
+滑動自動追隨 / 邊緣自動卷軸
+播放時視窗自動追隨；拖曳靠近左右邊界可自動卷軸。
+
+匯出
+內建 WAV，支援 M4A（AAC）；MP3 依裝置 FFmpeg 變體而定。
 
 ## Project Structure / 專案結構
 

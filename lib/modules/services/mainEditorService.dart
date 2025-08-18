@@ -30,13 +30,29 @@ enum AudioExportFormat { mp3, m4a, wav }
 class MainEditorService extends ChangeNotifier {
   MainEditorService({PcmDecoder? decoder})
     : _decoder = decoder ?? const FfmpegKitDecoder() {
-    // 初始化磁吸控制器：你提供了 getClipEdgePoints / getPlayheadMs / getDurationMs
     snap = SnapController(
       getClipEdgePoints: ({String? excludeId}) =>
           _collectClipEdgePoints(excludeId: excludeId),
-      getPlayheadMs: () => playhead.value,
-      getDurationMs: () => durationMs,
+      // ★ 用顯示用播放頭（含 A/V 補償），畫面上的紅線一致
+      getPlayheadMs: () => displayPlayheadMs,
+      // ★ 用時間軸總長，不要用播放器長度
+      getDurationMs: () => timelineTotalMs,
     );
+  }
+
+  // ★ 新增：時間軸總長（專案視角）
+  int get timelineTotalMs {
+    int ms = 0;
+    for (final t in tracks) {
+      // 軌本身預估長度
+      ms = math.max(ms, t.durationMs);
+      // 每個片段的實際終點
+      for (final s in t.track.segments) {
+        ms = math.max(ms, s.dstOffsetMs + s.srcDurationMs);
+      }
+    }
+    // 後備：若全空，至少回傳 0
+    return ms;
   }
 
   // ===== 基本相依 =====
@@ -91,6 +107,17 @@ class MainEditorService extends ChangeNotifier {
     final d = p - _avOffsetMs;
     return d < 0 ? 0 : d;
   }
+
+  // 類別 MainEditorService 內：加/覆蓋這些成員
+  // 全域磁吸總開關（UI 可綁一個 Toggle）
+  final ValueNotifier<bool> snapEnabled = ValueNotifier<bool>(true);
+
+  // 指引線：畫在 TrackLane 的青色細線
+  final ValueNotifier<SnapPoint?> snapGuide = ValueNotifier<SnapPoint?>(null);
+  // 新增（用來畫「另一端」那條線）
+  final ValueNotifier<int?> snapGuideOppositeMs = ValueNotifier<int?>(null);
+  // Snapping 控制器（用 modules/editing/snapping.dart 這套）
+  late final SnapController snap;
 
   double _gain01ToDb(double g) {
     if (g <= 0.0) return _gainDbMin;
@@ -150,6 +177,7 @@ class MainEditorService extends ChangeNotifier {
     playhead.dispose();
     meter.dispose();
     snapGuide.dispose();
+    snapGuideOppositeMs.dispose(); // ★ 新增
     super.dispose();
   }
 
@@ -437,13 +465,10 @@ class MainEditorService extends ChangeNotifier {
   // 互動編輯（拖曳＋磁吸）
   // --------------------------------------------------------------------------
 
+  // ───────────────── 互動編輯（拖曳＋磁吸）─────────────────
+
   bool _interactiveEditing = false;
   final Set<SingleTrackService> _touchedTracks = {};
-
-  // 導引線（UI 畫高亮）
-  final ValueNotifier<SnapPoint?> snapGuide = ValueNotifier<SnapPoint?>(null);
-
-  late final SnapController snap;
 
   void beginInteractiveEdit() {
     if (_interactiveEditing) return;
@@ -451,39 +476,100 @@ class MainEditorService extends ChangeNotifier {
     _touchedTracks.clear();
     snap.beginDrag();
     snapGuide.value = null;
+    snapGuideOppositeMs.value = null; // ★ 新增
   }
 
   /// 拖曳過程：更新該段的目的時間，但【不重建混音】
+  // lib/modules/services/mainEditorService.dart（類別 MainEditorService 內）
+
   void updateInteractiveDrag({
     required SingleTrackService track,
     required Segment segment,
     required int rawMs,
     required bool snappingEnabled,
+    required double pxPerMs,
     String? excludeId,
   }) {
-    // 第一次觸碰：暫停該軌渲染，避免每 1px 都重算
     final firstTouch = _touchedTracks.add(track);
     if (firstTouch) track.setRenderSuspended(true);
 
-    // 磁吸
+    // 門檻用像素感知
+    final desiredPx = 12.0;
+    final thrMs = (desiredPx / pxPerMs).round().clamp(1, 1 << 30);
+    if (snap.config.thresholdMs != thrMs) {
+      snap.config = snap.config.copyWith(thresholdMs: thrMs);
+    }
+
+    final dur = segment.srcDurationMs;
+
+    // ---------- 1) 只看「片段邊緣」的候選（跨所有音軌），優先判斷 butt ----------
+    int? nearestClipMs(int targetMs) {
+      int bestDelta = 1 << 30;
+      int? bestMs;
+      for (final p in _collectClipEdgePoints(excludeId: excludeId)) {
+        // 只收 clip-start / clip-end
+        if (p.tag != 'clip-start' && p.tag != 'clip-end') continue;
+        final d = (p.ms - targetMs).abs();
+        if (d < bestDelta) {
+          bestDelta = d;
+          bestMs = p.ms;
+        }
+      }
+      return (bestDelta <= thrMs) ? bestMs : null;
+    }
+
+    // 左端（起點）對別人的邊
+    final startJoinMs = snappingEnabled && snapEnabled.value
+        ? nearestClipMs(rawMs)
+        : null;
+
+    // 右端（rawMs + dur）對別人的邊
+    final endJoinMs = snappingEnabled && snapEnabled.value
+        ? nearestClipMs(rawMs + dur)
+        : null;
+
     int dst = rawMs;
-    final res = snap.snapMs(
-      rawMs,
-      excludeId: excludeId,
-      snappingEnabled: snappingEnabled,
-    );
-    if (res != null) {
-      dst = res.snappedMs;
-      snapGuide.value = res.target; // UI 畫導引線
+
+    if (startJoinMs != null || endJoinMs != null) {
+      // 兩端都命中就取較近者（避免被網格/播放頭搶走）
+      final dStart = (startJoinMs != null)
+          ? (startJoinMs - rawMs).abs()
+          : 1 << 30;
+      final dEnd = (endJoinMs != null)
+          ? (endJoinMs - (rawMs + dur)).abs()
+          : 1 << 30;
+
+      if (dEnd <= dStart && endJoinMs != null) {
+        // 右端貼到別人的邊：接縫=endJoinMs，起點=接縫-長度
+        final join = endJoinMs;
+        dst = (join - dur).clamp(0, durationMs);
+        snapGuide.value = SnapPoint(join, 'butt'); // 畫接縫線（跨軌也會畫）
+      } else {
+        // 左端貼到別人的邊：接縫=startJoinMs，起點=接縫
+        final join = startJoinMs!;
+        dst = join.clamp(0, durationMs);
+        snapGuide.value = SnapPoint(join, 'butt');
+      }
     } else {
+      // ---------- 2) 完全沒 butt 命中 → 退回一般吸附（網格/播放頭/片段邊），不畫線 ----------
+      final res = snap.snapMs(
+        rawMs,
+        excludeId: excludeId,
+        snappingEnabled: snappingEnabled && snapEnabled.value,
+      );
+      if (res != null) {
+        dst = res.snappedMs;
+      } else {
+        dst = rawMs;
+      }
       snapGuide.value = null;
     }
 
-    // 輕量位移（只改 segment.dstOffsetMs 與 UI）
+    // 快移（不重建混音）
     track.moveSegmentFast(segment, newDstOffsetMs: dst);
   }
 
-  /// 放開手指/滑鼠：只重建 touched 軌 → 重建 master →（選擇性）seek
+  /// 放開手指/滑鼠：只重建 touched 軌 → master →（選擇性）seek
   Future<void> endInteractiveEdit({int? postSeekMs}) async {
     snap.endDrag();
     final touched = List<SingleTrackService>.from(_touchedTracks);
@@ -506,6 +592,10 @@ class MainEditorService extends ChangeNotifier {
       final ms = (postSeekMs.clamp(0, durationMs)) as int;
       await seekTo(ms);
     }
+
+    snap.endDrag();
+    snapGuide.value = null;
+    snapGuideOppositeMs.value = null; // ★ 新增
   }
 
   // 收集可磁吸的片段邊緣
@@ -700,5 +790,42 @@ class MainEditorService extends ChangeNotifier {
     if (!Platform.isAndroid) return 0;
     final info = await DeviceInfoPlugin().androidInfo;
     return info.version.sdkInt;
+  }
+
+  // lib/modules/services/mainEditorService.dart（類別裡加入）
+  /// 例如 bpm=120, division=4 表示「四分音符」；division=8 是八分音符。
+  void setGridByBpm({required double bpm, int division = 4}) {
+    if (bpm <= 0) return;
+    final msPerBeat = 60000.0 / bpm; // 四分音符毫秒
+    final factor = division / 4.0; // 4→1倍；8→2倍；16→4倍...
+    final stepMs = (msPerBeat / (1 / factor)).round(); // 換算該分割的毫秒
+    snap.config = snap.config.copyWith(
+      toGrid: true,
+      gridStepMs: stepMs.clamp(1, 1 << 30),
+    );
+  }
+
+  /// 也給個固定毫秒網格的 API（例如 250ms）
+  void setGridMs(int stepMs) {
+    snap.config = snap.config.copyWith(
+      toGrid: true,
+      gridStepMs: stepMs.clamp(1, 1 << 30),
+    );
+  }
+
+  // ★ 取「某毫秒」附近最近的片段邊緣（不含自己）
+  SnapPoint? _nearestClipEdgeAround(int ms, {String? excludeId}) {
+    final pts = _collectClipEdgePoints(excludeId: excludeId);
+    if (pts.isEmpty) return null;
+    SnapPoint? best;
+    var bestD = 1 << 30;
+    for (final p in pts) {
+      final d = (p.ms - ms).abs();
+      if (d < bestD) {
+        best = p;
+        bestD = d;
+      }
+    }
+    return best;
   }
 }
