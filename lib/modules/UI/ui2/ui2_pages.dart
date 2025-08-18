@@ -181,6 +181,49 @@ class _TracksPageState extends State<TracksPage> {
     _hGroup.animateTo(targetLeft, duration: _animDur, curve: Curves.easeOut);
   }
 
+  void _onLaneTapDown({
+    required String laneId,
+    required TapDownDetails details,
+    required BuildContext areaCtx,
+  }) {
+    final isSelectedLane = _laneSvc.selectedLaneId.value == laneId;
+
+    // 第一次點：只選取；第二次（已選取）才移動播放頭
+    if (!isSelectedLane) {
+      _laneSvc.selectLane(laneId);
+      return;
+    }
+
+    // 取得在「音軌可視區」中的 x（px）
+    final box = areaCtx.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(details.globalPosition);
+    final dx = local.dx;
+
+    // 轉成世界座標與時間（毫秒）
+    final worldX = _hGroup.offset + dx;
+    int ms = (worldX / widget.pxPerMs).round();
+    ms = ms.clamp(0, _laneMs); // 不超出長度
+
+    // 移動播放頭（交給父層/服務）
+    widget.onSeekMs(ms);
+
+    // 若目前是暫停狀態，順帶把播放頭滾進視窗（與自動追隨一致的邏輯）
+    if (!widget.editor.isPlaying && _viewportRightW > 0) {
+      final contentW = _ms2x(_laneMs) + 40;
+      final maxScroll = contentW - _viewportRightW;
+      if (maxScroll > 0) {
+        double targetLeft = worldX - _viewportRightW * _followBias;
+        targetLeft = targetLeft.clamp(0.0, maxScroll);
+        _hGroup.animateTo(
+          targetLeft,
+          duration: _animDur,
+          curve: Curves.easeOut,
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // 確保控制器數量足夠（首次 build / 匯入刪除軌）
@@ -272,20 +315,34 @@ class _TracksPageState extends State<TracksPage> {
                                 const SizedBox(width: _gutterW),
 
                                 // 右側：音軌區（各自 controller，但被 _hGroup 連動）
+                                // 右側：音軌區（各自 controller，但被 _hGroup 連動）
                                 Expanded(
                                   child: ClipRRect(
                                     borderRadius: BorderRadius.circular(10),
-                                    child: TrackLane(
-                                      laneId: laneId, // ★ 傳唯一 ID
-                                      laneSvc: _laneSvc, // ★ 共用 service（單一選取）
-                                      track: trackSvc,
-                                      editor: widget.editor,
-                                      pxPerMs: widget.pxPerMs,
-                                      durationMs: widget.durationMs,
-                                      canEdit: widget.canEdit,
-                                      scrollController: _hGroup.controllerAt(i),
-                                      showPlayhead: false, // 由父層畫公共紅線
-                                      autoFollow: false, // 由父層統一追隨
+                                    child: Builder(
+                                      builder: (areaCtx) => GestureDetector(
+                                        behavior: HitTestBehavior
+                                            .translucent, // 點空白也能觸發
+                                        onTapDown: (d) => _onLaneTapDown(
+                                          laneId: laneId,
+                                          details: d,
+                                          areaCtx: areaCtx,
+                                        ),
+                                        child: TrackLane(
+                                          laneId: laneId, // ★ 傳唯一 ID
+                                          laneSvc:
+                                              _laneSvc, // ★ 共用 service（單一選取）
+                                          track: trackSvc,
+                                          editor: widget.editor,
+                                          pxPerMs: widget.pxPerMs,
+                                          durationMs: widget.durationMs,
+                                          canEdit: widget.canEdit,
+                                          scrollController: _hGroup
+                                              .controllerAt(i),
+                                          showPlayhead: false, // 由父層畫公共紅線
+                                          autoFollow: false, // 由父層統一追隨
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
