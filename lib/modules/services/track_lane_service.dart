@@ -21,7 +21,9 @@ class TrackLaneService {
 
   bool isLaneSelected(String laneId) => selectedLaneId.value == laneId;
   bool isSegmentSelected(String segId) => selectedSegmentId.value == segId;
-  final ValueNotifier<double> _scrollLeftPx = ValueNotifier(0);
+  // 加在欄位區
+  final ValueNotifier<bool> dragging = ValueNotifier<bool>(false);
+  bool get isDragging => dragging.value; // 兼容舊用法
   void selectLane(String laneId) {
     if (selectedLaneId.value != laneId) {
       selectedLaneId.value = laneId;
@@ -41,24 +43,30 @@ class TrackLaneService {
     selectedSegmentId.value = null;
   }
 
+  //（建議）補一個釋放，以免記憶體漏
+  void dispose() {
+    selectedLaneId.dispose();
+    selectedSegmentId.dispose();
+    dragging.dispose();
+    viewport.dispose();
+  }
+
   // ---- 拖曳狀態 ----
   _DragCtx? _drag;
-  bool get isDragging => _drag != null;
 
   /// onPanStart：若尚未選取該段 -> 僅選取、不開拖曳；回傳是否真的開始拖曳
+  // panStart：真的開始拖曳時，發通知
   bool panStart({
     required String laneId,
     required SingleTrackService track,
     required Segment segment,
-    required double localDx, // d.localPosition.dx
+    required double localDx,
   }) {
-    // 未選取 -> 只選取，不進入拖曳
     if (!(isLaneSelected(laneId) && isSegmentSelected(segment.id))) {
       selectSegment(laneId: laneId, segId: segment.id);
       return false;
     }
 
-    // 真的開始拖曳
     _drag = _DragCtx(
       laneId: laneId,
       track: track,
@@ -66,6 +74,7 @@ class TrackLaneService {
       startDx: localDx,
       startMs: segment.dstOffsetMs,
     );
+    dragging.value = true; // ★ 通知：開始拖
     editor.beginInteractiveEdit();
     editor.snap.beginDrag();
     editor.snapGuide.value = null;
@@ -100,18 +109,19 @@ class TrackLaneService {
   /// onPanEnd：結束拖曳，這裡才觸發混音重建
 
   // track_lane_service.dart
+  // panEnd：結束時關閉拖曳並發通知
   Future<void> panEnd({int? postSeekMs}) async {
     final ctx = _drag;
     if (ctx == null) return;
 
-    // 保險：提交最後位置
     ctx.track.setSegmentOffset(
       ctx.segment,
       newDstOffsetMs: ctx.segment.dstOffsetMs,
     );
-
     _drag = null;
-    await editor.endInteractiveEdit(postSeekMs: postSeekMs); // ★ 傳入
+    dragging.value = false; // ★ 通知：結束拖
+
+    await editor.endInteractiveEdit(postSeekMs: postSeekMs);
   }
 
   // ---- 拖曳邊緣自動卷軸（節流） ----

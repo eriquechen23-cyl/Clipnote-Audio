@@ -10,6 +10,9 @@ import 'package:flutter/services.dart'; // Alt 切換磁吸（桌面）
 import 'package:clipnote_audio/modules/services/singleTrackService.dart';
 import 'package:clipnote_audio/modules/services/mainEditorService.dart';
 
+// enum
+enum TrackLaneDragMode { longPress, horizontal }
+
 class TrackLane extends StatefulWidget {
   final String laneId; // 唯一 lane ID（例如 "lane-0"）
   final TrackLaneService laneSvc; // 共用 Service（父層傳入）
@@ -22,6 +25,8 @@ class TrackLane extends StatefulWidget {
   final ScrollController? scrollController; // 共用水平卷軸（可選）
   final bool showPlayhead; // 是否在本 lane 畫播放頭
   final bool autoFollow; // 是否啟用自動追隨
+  // TrackLane 的建構子多一個參數
+  final TrackLaneDragMode dragMode; // required this.dragMode,
 
   const TrackLane({
     super.key,
@@ -35,6 +40,7 @@ class TrackLane extends StatefulWidget {
     this.scrollController,
     this.showPlayhead = false,
     this.autoFollow = true,
+    required this.dragMode,
   });
 
   @override
@@ -185,7 +191,8 @@ class _TrackLaneState extends State<TrackLane> {
 
   // === 背景/片段互動 ===
   void _onBackgroundTapUp(TapUpDetails d) {
-    widget.laneSvc.clearSelection(); // 點空白清除選取
+    if (widget.laneSvc.isDragging) return; // 正在或剛結束拖曳，不處理
+    widget.laneSvc.clearSelection();
     final ms = (d.localPosition.dx / widget.pxPerMs).round().clamp(0, _laneMs);
     widget.editor.seekTo(ms);
   }
@@ -349,6 +356,105 @@ class _TrackLaneState extends State<TrackLane> {
     }
   }
 
+  Widget _buildSegmentGesture({required Segment seg, required Widget child}) {
+    // 僅「水平拖曳」當作移動；選擇不定時才給「功能選單」
+    if (widget.dragMode == TrackLaneDragMode.horizontal) {
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _onSegmentTap(seg),
+
+        // 拖曳 = 水平拖；被辨識後才鎖捲動
+        onHorizontalDragStart: (d) {
+          if (!widget.canEdit) return;
+          setState(() => _scrollLocked = true); // ← 現在才鎖
+          _onHorizontalDragStart(seg, d);
+        },
+        onHorizontalDragUpdate: (d) => _onHorizontalDragUpdate(seg, d),
+        onHorizontalDragEnd: (d) async {
+          await _onHorizontalDragEnd(seg, d);
+          if (_scrollLocked) setState(() => _scrollLocked = false);
+        },
+        onHorizontalDragCancel: () async {
+          _onDragCancelFor(seg);
+          if (_scrollLocked) setState(() => _scrollLocked = false);
+        },
+
+        // 功能選單：只在「沒有拖」的情況才有機會觸發
+        onLongPressStart: (d) => _onSegmentLongPressStart(seg, d),
+
+        // 桌面右鍵也能叫出選單
+        onSecondaryTapDown: (d) => _onSegmentLongPressStart(
+          seg,
+          LongPressStartDetails(
+            globalPosition: d.globalPosition,
+            localPosition: d.localPosition,
+          ),
+        ),
+        child: child,
+      );
+    }
+
+    // === dragMode == longPress：用長按拖曳移動；選單換到右鍵/雙擊 ===
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _onSegmentTap(seg),
+
+      // 拖曳 = 長按拖
+      onLongPressStart: (d) {
+        if (!widget.canEdit) return;
+        setState(() => _scrollLocked = true);
+        // 用 panStart 啟拖：把 localPosition 丟進去
+        widget.laneSvc.panStart(
+          laneId: widget.laneId,
+          track: widget.track,
+          segment: seg,
+          localDx: d.localPosition.dx,
+        );
+        setState(() {}); // 立即刷新選取樣式
+      },
+      onLongPressMoveUpdate: (d) {
+        if (!widget.canEdit || !widget.laneSvc.isDragging) return;
+        widget.laneSvc.panUpdate(
+          localDx: d.localPosition.dx,
+          pxPerMs: widget.pxPerMs,
+          laneMs: _laneMs,
+          snappingEnabled: _snapOn,
+        );
+        widget.laneSvc.autoScrollWhileDragging(
+          controller: _sc,
+          viewportWidth: _viewportWidth,
+          pxPerMs: widget.pxPerMs,
+          laneMs: _laneMs,
+          edgeMargin: _edgeMargin,
+        );
+        setState(() {});
+      },
+      onLongPressEnd: (d) async {
+        if (!widget.canEdit) return;
+        _commitSegment(seg);
+        await widget.laneSvc.panEnd(postSeekMs: seg.dstOffsetMs);
+        if (_scrollLocked) setState(() => _scrollLocked = false);
+      },
+
+      // 避免長按同時當選單：選單改右鍵 / 雙擊
+      onDoubleTapDown: (d) => _onSegmentLongPressStart(
+        seg,
+        LongPressStartDetails(
+          globalPosition: d.globalPosition,
+          localPosition: d.localPosition,
+        ),
+      ),
+      onSecondaryTapDown: (d) => _onSegmentLongPressStart(
+        seg,
+        LongPressStartDetails(
+          globalPosition: d.globalPosition,
+          localPosition: d.localPosition,
+        ),
+      ),
+      child: child,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final listens = Listenable.merge([
@@ -456,40 +562,28 @@ class _TrackLaneState extends State<TrackLane> {
                                 widget.laneSvc.isLaneSelected(widget.laneId) &&
                                 widget.laneSvc.isSegmentSelected(seg.id);
 
+                            final card = _SegmentCard(
+                              name: widget.track.name,
+                              color: widget.track.color,
+                              fadeInMs: seg.fadeInMs,
+                              fadeOutMs: seg.fadeOutMs,
+                              durationMs: seg.srcDurationMs,
+                              pxPerMs: widget.pxPerMs,
+                              selected: selected,
+                            );
+
                             return Positioned(
                               left: x,
                               top: 6,
                               width: w,
                               bottom: 6,
-                              child: Listener(
-                                // ★ 先攔截 pointerDown 來鎖捲動
-                                onPointerDown: _onDragDown,
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: () => _onSegmentTap(seg), // 點一下先選取
-                                  onHorizontalDragStart: (d) =>
-                                      _onHorizontalDragStart(seg, d),
-                                  onHorizontalDragUpdate: (d) =>
-                                      _onHorizontalDragUpdate(seg, d),
-                                  onHorizontalDragEnd: (d) =>
-                                      _onHorizontalDragEnd(seg, d), // ★ 傳 seg
-                                  onHorizontalDragCancel: () =>
-                                      _onDragCancelFor(seg), // ★ 取消也提交
-                                  onLongPressStart: (d) =>
-                                      _onSegmentLongPressStart(seg, d),
-                                  child: _SegmentCard(
-                                    name: widget.track.name,
-                                    color: widget.track.color,
-                                    fadeInMs: seg.fadeInMs,
-                                    fadeOutMs: seg.fadeOutMs,
-                                    durationMs: seg.srcDurationMs,
-                                    pxPerMs: widget.pxPerMs,
-                                    selected: selected,
-                                  ),
-                                ),
+                              child: _buildSegmentGesture(
+                                seg: seg,
+                                child: card,
                               ),
                             );
                           }),
+
                           // 4) 播放頭（通常關閉，由父層統一畫一條）
                           if (widget.showPlayhead)
                             Positioned(

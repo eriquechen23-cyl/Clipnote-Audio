@@ -118,6 +118,9 @@ class _TracksPageState extends State<TracksPage> {
   static const Duration _animDur = Duration(milliseconds: 120);
   late final TrackLaneService _laneSvc; // ★ 共用：一次只選一個 lane
 
+  // _TracksPageState 內成員
+  bool _laneTapCanceled = false; // 被長按/拖曳取消時，父層不做 seek
+
   @override
   void initState() {
     super.initState();
@@ -137,6 +140,7 @@ class _TracksPageState extends State<TracksPage> {
   void dispose() {
     widget.editor.playhead.removeListener(_onTick);
     widget.editor.playing.removeListener(_maybeAutoFollow);
+    _laneSvc.dispose(); // ★ 新增：釋放 notifiers
     _hGroup.dispose();
     super.dispose();
   }
@@ -224,6 +228,245 @@ class _TracksPageState extends State<TracksPage> {
     }
   }
 
+  // ===== 新增：小工具，從 global 位置換算成 ms =====
+  int _globalPositionToMs({
+    required BuildContext areaCtx,
+    required Offset global,
+    required double pxPerMs,
+    required double scrollLeft,
+    required int laneMs,
+  }) {
+    final box = areaCtx.findRenderObject() as RenderBox?;
+    if (box == null) return 0;
+    final local = box.globalToLocal(global);
+    final worldX = scrollLeft + local.dx; // 視窗 → 世界座標
+    int ms = (worldX / pxPerMs).round();
+    return ms.clamp(0, laneMs);
+  }
+
+  // ===== 取代原本的 _onLaneTapDown：拆兩個 =====
+  void _onLaneTapDownSelect({required String laneId}) {
+    final isSelected = _laneSvc.selectedLaneId.value == laneId;
+    if (!isSelected) _laneSvc.selectLane(laneId); // 只有選取，不移動播放頭
+  }
+
+  void _onLaneTapUpSeek({
+    required String laneId,
+    required TapUpDetails details,
+    required BuildContext areaCtx,
+  }) {
+    if (_laneTapCanceled || _laneSvc.isDragging) return;
+    // 只有「點擊且已選取的 lane」才移動播放頭；長按/拖曳不會觸發 onTapUp
+    final isSelected = _laneSvc.selectedLaneId.value == laneId;
+    if (!isSelected) return;
+
+    final ms = _globalPositionToMs(
+      areaCtx: areaCtx,
+      global: details.globalPosition,
+      pxPerMs: widget.pxPerMs,
+      scrollLeft: _hGroup.offset,
+      laneMs: _laneMs,
+    );
+
+    widget.onSeekMs(ms);
+
+    // 暫停狀態下，順帶把播放頭滾入視窗（沿用你的追隨邏輯）
+    if (!widget.editor.isPlaying && _viewportRightW > 0) {
+      final contentW = _ms2x(_laneMs) + 40;
+      final maxScroll = contentW - _viewportRightW;
+      if (maxScroll > 0) {
+        double targetLeft =
+            (_ms2x(ms).toDouble()) - _viewportRightW * _followBias;
+        targetLeft = targetLeft.clamp(0.0, maxScroll);
+        _hGroup.animateTo(
+          targetLeft,
+          duration: _animDur,
+          curve: Curves.easeOut,
+        );
+      }
+    }
+  }
+
+  // 放在 _TracksPageState 裡，任一方法之上都可
+  Widget _liftIfDragging({required Widget child, required bool lift}) {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 140),
+      curve: Curves.easeOutCubic,
+      tween: Tween(begin: 0, end: lift ? 1 : 0),
+      builder: (_, t, __) {
+        final dy = -10.0 * t; // 位移：-10px
+        final scale = 1.0 + 0.03 * t; // 縮放：+3%
+        final br = 12.0; // 外框圓角
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Transform.translate(
+              offset: Offset(0, dy),
+              child: Transform.scale(
+                scale: scale,
+                alignment: Alignment.center,
+                child: Container(
+                  // 外部陰影 + 青色外發光
+                  decoration: BoxDecoration(
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.65 * t),
+                        blurRadius: 28 * t,
+                        spreadRadius: 2 * t,
+                        offset: Offset(0, 10 * t),
+                      ),
+                      BoxShadow(
+                        color: const Color(0xFF22D3EE).withOpacity(0.40 * t),
+                        blurRadius: 38 * t,
+                        spreadRadius: 2 * t,
+                      ),
+                    ],
+                  ),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 140),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(br),
+                      border: Border.all(
+                        color: const Color(0xFF22D3EE).withOpacity(0.95 * t),
+                        width: 2.0 * t, // 浮起時出現 2px 青色外框
+                      ),
+                    ),
+                    child: child,
+                  ),
+                ),
+              ),
+            ),
+            if (t > 0)
+              // 上緣淡淡高光，讓「浮起」更立體
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(br),
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.white.withOpacity(0.06 * t),
+                          Colors.transparent,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildTrackRow({
+    required int index,
+    required String laneId,
+    required SingleTrackService trackSvc,
+    required bool isSelectedLane,
+  }) {
+    return SizedBox(
+      height: _rowHeight,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: isSelectedLane
+                ? const Color(0x1A22D3EE)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ← 左邊把手 + Header（用把手啟動父層重排）
+              SizedBox(
+                width: _headerW,
+                child: Row(
+                  children: [
+                    ReorderableDragStartListener(
+                      index: index,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Icon(
+                          Icons.drag_handle_rounded,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _laneSvc.selectLane(laneId),
+                        child: _TrackHeader(
+                          index: index,
+                          name: trackSvc.name,
+                          color: trackSvc.color,
+                          isMuted: widget.editor.trackMuted(index),
+                          gain: widget.editor.trackGain(index),
+                          onToggleMute: () =>
+                              widget.editor.toggleTrackMute(index),
+                          onDelete: () => widget.onDeleteTrack(index),
+                          onGainChanged: (v) =>
+                              widget.editor.setTrackGain(index, v),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: _gutterW),
+
+              // 右側 Lane（維持你原本的 TrackLane）
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Builder(
+                    builder: (areaCtx) => GestureDetector(
+                      behavior:
+                          HitTestBehavior.deferToChild, // 讓子元件優先（長按/拖曳會取消父 tap）
+                      onTapDown: (_) {
+                        _laneTapCanceled = false; // 新增：預設不取消
+                        _onLaneTapDownSelect(laneId: laneId); // 只做「選軌」
+                      },
+                      onTapCancel: () {
+                        // 新增：被長按或拖曳搶走時會進來
+                        _laneTapCanceled = true;
+                      },
+                      onTapUp: (d) => _onLaneTapUpSeek(
+                        // 只有沒被取消才會 Seek（見第 3 步）
+                        laneId: laneId,
+                        details: d,
+                        areaCtx: areaCtx,
+                      ),
+                      child: TrackLane(
+                        laneId: laneId,
+                        laneSvc: _laneSvc,
+                        track: trackSvc,
+                        editor: widget.editor,
+                        pxPerMs: widget.pxPerMs,
+                        durationMs: widget.durationMs,
+                        canEdit: widget.canEdit,
+                        scrollController: _hGroup.controllerAt(index),
+                        showPlayhead: false,
+                        autoFollow: false,
+                        // ★ 用水平拖移動片段；長按留給切割選單
+                        dragMode: TrackLaneDragMode.horizontal,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // 確保控制器數量足夠（首次 build / 匯入刪除軌）
@@ -259,7 +502,13 @@ class _TracksPageState extends State<TracksPage> {
                 }
                 return false;
               },
-              child: ListView.builder(
+              child: ReorderableListView.builder(
+                buildDefaultDragHandles: false, // 關閉整列長按
+                onReorder: (from, to) {
+                  // 把實際換位邏輯丟回你原本的 onReorder（若有）
+                  if (widget.onReorder != null) widget.onReorder!(from, to);
+                  setState(() {}); // 重建
+                },
                 padding: const EdgeInsets.fromLTRB(
                   _listPadL,
                   8,
@@ -271,12 +520,18 @@ class _TracksPageState extends State<TracksPage> {
                   final laneId = 'lane-$i';
                   final trackSvc = widget.tracks[i];
 
-                  return ValueListenableBuilder<String?>(
-                    valueListenable: _laneSvc.selectedLaneId,
-                    builder: (_, selectedLaneId, __) {
-                      final isSelectedLane = selectedLaneId == laneId;
+                  return AnimatedBuilder(
+                    key: ValueKey(laneId), // ★ Reorderable 需要穩定 key
+                    animation: Listenable.merge([
+                      _laneSvc.selectedLaneId, // 切換選軌時重建
+                      _laneSvc.dragging, // ★ 拖曳期間重建 → 觸發浮起動畫
+                    ]),
+                    builder: (_, __) {
+                      final isSelectedLane =
+                          _laneSvc.selectedLaneId.value == laneId;
+                      final isFloating = isSelectedLane && _laneSvc.isDragging;
 
-                      return SizedBox(
+                      final row = SizedBox(
                         height: _rowHeight,
                         child: Padding(
                           padding: const EdgeInsets.only(bottom: 8),
@@ -290,40 +545,63 @@ class _TracksPageState extends State<TracksPage> {
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                // 左側控制欄
+                                // 左側控制欄（含把手）
                                 SizedBox(
                                   width: _headerW,
-                                  child: GestureDetector(
-                                    behavior: HitTestBehavior.opaque,
-                                    onTap: () => _laneSvc.selectLane(
-                                      laneId,
-                                    ), // ★ 點 header 即選 lane
-                                    child: _TrackHeader(
-                                      index: i,
-                                      name: trackSvc.name,
-                                      color: trackSvc.color,
-                                      isMuted: widget.editor.trackMuted(i),
-                                      gain: widget.editor.trackGain(i),
-                                      onToggleMute: () =>
-                                          widget.editor.toggleTrackMute(i),
-                                      onDelete: () => widget.onDeleteTrack(i),
-                                      onGainChanged: (v) =>
-                                          widget.editor.setTrackGain(i, v),
-                                    ),
+                                  child: Row(
+                                    children: [
+                                      ReorderableDragStartListener(
+                                        index: i,
+                                        child: const Padding(
+                                          padding: EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                          ),
+                                          child: Icon(
+                                            Icons.drag_handle_rounded,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () =>
+                                              _laneSvc.selectLane(laneId),
+                                          child: _TrackHeader(
+                                            index: i,
+                                            name: trackSvc.name,
+                                            color: trackSvc.color,
+                                            isMuted: widget.editor.trackMuted(
+                                              i,
+                                            ),
+                                            gain: widget.editor.trackGain(i),
+                                            onToggleMute: () => widget.editor
+                                                .toggleTrackMute(i),
+                                            onDelete: () =>
+                                                widget.onDeleteTrack(i),
+                                            onGainChanged: (v) => widget.editor
+                                                .setTrackGain(i, v),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
+
                                 const SizedBox(width: _gutterW),
 
-                                // 右側：音軌區（各自 controller，但被 _hGroup 連動）
-                                // 右側：音軌區（各自 controller，但被 _hGroup 連動）
+                                // 右側：音軌區
                                 Expanded(
                                   child: ClipRRect(
                                     borderRadius: BorderRadius.circular(10),
                                     child: Builder(
                                       builder: (areaCtx) => GestureDetector(
                                         behavior: HitTestBehavior
-                                            .translucent, // 點空白也能觸發
-                                        onTapDown: (d) => _onLaneTapDown(
+                                            .deferToChild, // 讓子元件優先處理拖曳/長按
+                                        onTapDown: (_) => _onLaneTapDownSelect(
+                                          laneId: laneId,
+                                        ),
+                                        onTapUp: (d) => _onLaneTapUpSeek(
                                           laneId: laneId,
                                           details: d,
                                           areaCtx: areaCtx,
@@ -341,6 +619,8 @@ class _TracksPageState extends State<TracksPage> {
                                               .controllerAt(i),
                                           showPlayhead: false, // 由父層畫公共紅線
                                           autoFollow: false, // 由父層統一追隨
+                                          dragMode:
+                                              TrackLaneDragMode.horizontal,
                                         ),
                                       ),
                                     ),
@@ -351,6 +631,8 @@ class _TracksPageState extends State<TracksPage> {
                           ),
                         ),
                       );
+
+                      return _liftIfDragging(child: row, lift: isFloating);
                     },
                   );
                 },
