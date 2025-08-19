@@ -27,6 +27,9 @@ class TrackLane extends StatefulWidget {
   final bool autoFollow; // 是否啟用自動追隨
   // TrackLane 的建構子多一個參數
   final TrackLaneDragMode dragMode; // required this.dragMode,
+  // 當縮放變動（pxPerMs 改變）時，是否由本元件自動以「播放頭」作為錨點調整卷軸
+  // 若由父層（TracksPage）以手勢縮放並自行計算錨點，請設為 false，避免互相搶卷軸。
+  final bool maintainPlayheadOnZoom;
 
   const TrackLane({
     super.key,
@@ -41,6 +44,7 @@ class TrackLane extends StatefulWidget {
     this.showPlayhead = false,
     this.autoFollow = true,
     required this.dragMode,
+    this.maintainPlayheadOnZoom = true,
   });
 
   @override
@@ -110,7 +114,8 @@ class _TrackLaneState extends State<TrackLane> {
 
     // ✅ 當縮放變動（pxPerMs 改變）時，讓視窗仍然對準「原本畫面裡的播放頭位置」
     // 也可以改成「固定讓播放頭落在 35% 視窗處」（下面備註有替代寫法）
-    if (oldWidget.pxPerMs != widget.pxPerMs &&
+    if (widget.maintainPlayheadOnZoom &&
+        oldWidget.pxPerMs != widget.pxPerMs &&
         _sc.hasClients &&
         _viewportWidth > 0) {
       final oldLeft = _sc.position.pixels;
@@ -202,10 +207,7 @@ class _TrackLaneState extends State<TrackLane> {
   }
 
   // --- 片段拖曳（用 HorizontalDrag，並在 pointer down 鎖滾動） ---
-  void _onDragDown(PointerDownEvent _) {
-    // 指針按下就先鎖滾動，避免手勢被 ScrollView 搶走
-    if (!_scrollLocked) setState(() => _scrollLocked = true);
-  }
+  // （移除未使用的 _onDragDown）
 
   // ★ 提交目前 segment 的最終位置（寫回資料層）
   void _commitSegment(Segment seg) {
@@ -266,96 +268,8 @@ class _TrackLaneState extends State<TrackLane> {
     await widget.laneSvc.panEnd(postSeekMs: seg.dstOffsetMs); // ★ 傳新位置
   }
 
-  Future<bool> _confirmDeleteSegment(BuildContext context, Segment seg) async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('刪除此段？'),
-            content: Text(
-              '起點 ${seg.dstOffsetMs} ms、長度 ${seg.srcDurationMs} ms',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('刪除'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
-  }
-
-  Future<void> _onSegmentLongPressStart(
-    Segment seg,
-    LongPressStartDetails d,
-  ) async {
-    final pos = d.globalPosition;
-    final choice = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx, pos.dy),
-      items: const [
-        PopupMenuItem(value: 'here', child: Text('在此處切割')),
-        PopupMenuItem(value: 'playhead', child: Text('在播放頭切割')),
-        PopupMenuItem(value: 'delete', child: Text('刪除此段')),
-      ],
-    );
-    if (choice == null) return;
-
-    if (choice == 'delete') {
-      final ok = await _confirmDeleteSegment(context, seg);
-      if (!ok) return;
-
-      // 找到目前索引，刪除後選鄰近
-      final segs = widget.track.track.segments;
-      final idx = segs.indexOf(seg);
-
-      widget.track.removeSegment(seg);
-      // 立即刷新本軌渲染與波形 & 主混音
-      widget.track.rebuildRenderedNow();
-      widget.track.buildDownsampledWaveform(step: 128);
-      await widget.editor.rebuildMaster();
-
-      // 選取鄰近片段（若還有片段）
-      if (segs.isNotEmpty) {
-        final pick = segs[idx.clamp(0, segs.length - 1)];
-        widget.laneSvc.selectSegment(laneId: widget.laneId, segId: pick.id);
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('已刪除 1 段')));
-        setState(() {});
-      }
-      return;
-    }
-
-    // 其餘：切割
-    int splitMs;
-    if (choice == 'here') {
-      splitMs = (seg.dstOffsetMs + d.localPosition.dx / widget.pxPerMs).round();
-    } else {
-      splitMs = widget.editor.playheadMs;
-    }
-    final start = seg.dstOffsetMs;
-    final end = start + seg.srcDurationMs;
-    splitMs = splitMs.clamp(start + 1, end - 1);
-
-    final res = widget.track.splitSegment(seg, splitMs);
-    if (res != null && mounted) {
-      widget.track.rebuildRenderedNow();
-      widget.track.buildDownsampledWaveform(step: 128);
-      await widget.editor.rebuildMaster();
-      widget.laneSvc.selectSegment(laneId: widget.laneId, segId: res.right.id);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('已分割')));
-      setState(() {});
-    }
-  }
+  // 移除長按彈出選單：刪段/切割統一改由 MiniBar 的按鈕操作
+  // 保留長按拖曳模式在 dragMode == longPress 時的交互（見下方手勢綁定）
 
   Widget _buildSegmentGesture({required Segment seg, required Widget child}) {
     // 僅「水平拖曳」當作移動；選擇不定時才給「功能選單」
@@ -380,17 +294,7 @@ class _TrackLaneState extends State<TrackLane> {
           if (_scrollLocked) setState(() => _scrollLocked = false);
         },
 
-        // 功能選單：只在「沒有拖」的情況才有機會觸發
-        onLongPressStart: (d) => _onSegmentLongPressStart(seg, d),
-
-        // 桌面右鍵也能叫出選單
-        onSecondaryTapDown: (d) => _onSegmentLongPressStart(
-          seg,
-          LongPressStartDetails(
-            globalPosition: d.globalPosition,
-            localPosition: d.localPosition,
-          ),
-        ),
+        // 移除：不再提供長按/右鍵功能選單
         child: child,
       );
     }
@@ -437,21 +341,7 @@ class _TrackLaneState extends State<TrackLane> {
         if (_scrollLocked) setState(() => _scrollLocked = false);
       },
 
-      // 避免長按同時當選單：選單改右鍵 / 雙擊
-      onDoubleTapDown: (d) => _onSegmentLongPressStart(
-        seg,
-        LongPressStartDetails(
-          globalPosition: d.globalPosition,
-          localPosition: d.localPosition,
-        ),
-      ),
-      onSecondaryTapDown: (d) => _onSegmentLongPressStart(
-        seg,
-        LongPressStartDetails(
-          globalPosition: d.globalPosition,
-          localPosition: d.localPosition,
-        ),
-      ),
+      // 移除：不再提供雙擊/右鍵叫出選單
       child: child,
     );
   }
@@ -460,7 +350,6 @@ class _TrackLaneState extends State<TrackLane> {
   Widget build(BuildContext context) {
     final listens = Listenable.merge([
       widget.track.track,
-      widget.editor.playhead,
       widget.editor.snapGuide,
       widget.laneSvc.selectedLaneId, // 當前被選的 lane
       widget.laneSvc.selectedSegmentId, // 當前被選的 segment
@@ -473,17 +362,12 @@ class _TrackLaneState extends State<TrackLane> {
         _viewportWidth = constraints.maxWidth;
         WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoFollow());
 
-        // === 只畫視窗：算出目前可視區間 ===
-        final double leftPx = _sc.hasClients ? _sc.position.pixels : 0.0;
-        final double viewWidthPx = constraints.maxWidth;
-        final int viewMsStart = (leftPx / widget.pxPerMs).floor();
-        final int viewMsEnd =
-            viewMsStart + (viewWidthPx / widget.pxPerMs).ceil();
+        // === 只畫視窗：相關資訊由 ValueNotifier 傳遞給畫家 ===
 
         // 啟動一次非阻塞的封包確保（避免首次縮放/捲動卡頓）
         unawaited(widget.track.ensureEnvelopeForPxPerMs(widget.pxPerMs));
         // 拿到最接近 1px 一柱的封包層
-        final env = widget.track.pickEnvelopeForPxPerMs(widget.pxPerMs);
+        // 由 _WaveformWindowPainter 內部自行挑選封包層。
         return ClipRRect(
           borderRadius: BorderRadius.circular(10),
           child: Container(
@@ -510,9 +394,8 @@ class _TrackLaneState extends State<TrackLane> {
                   child: SingleChildScrollView(
                     controller: _sc,
                     scrollDirection: Axis.horizontal,
-                    physics: _scrollLocked
-                        ? const NeverScrollableScrollPhysics() // ★ 拖曳時關閉水平滾動
-                        : const ClampingScrollPhysics(),
+                    // 取消音軌上的水平滑動，改由 MiniBar 控制時間軸
+                    physics: const NeverScrollableScrollPhysics(),
                     child: SizedBox(
                       width: laneWidth,
                       height: double.infinity,
@@ -805,6 +688,24 @@ class _GridPainterWindow extends CustomPainter {
       final x = t * pxPerMs;
       if (x < leftPx - 2 || x > leftPx + viewportWidthPx + 2) continue;
       c.drawLine(Offset(x, 0), Offset(x, s.height), pMajor);
+
+      // 在上方畫刻度標籤（含單位）
+      final label = _fmtTimeUnit(t);
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: const TextStyle(
+            color: Color(0xCCFFFFFF),
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final lx = x - tp.width / 2;
+      if (lx + tp.width >= leftPx && lx <= leftPx + viewportWidthPx) {
+        tp.paint(c, Offset(lx, 2));
+      }
     }
   }
 
@@ -813,74 +714,35 @@ class _GridPainterWindow extends CustomPainter {
       old.pxPerMs != pxPerMs ||
       old.viewportWidthPx != viewportWidthPx ||
       old.scrollLeftPx != scrollLeftPx;
-}
 
-class _WaveformPainter extends CustomPainter {
-  final List<int> peaks; // downsampled peak values (0..32767)
-  final int stepSamples; // 每個 peak 代表的樣本數
-  final double pxPerMs;
-
-  _WaveformPainter({
-    required this.peaks,
-    required this.stepSamples,
-    required this.pxPerMs,
-  });
-
-  @override
-  void paint(Canvas c, Size s) {
-    if (peaks.isEmpty || stepSamples <= 0) return;
-
-    final midY = s.height / 2;
-    final paintFill = Paint()
-      ..color = const Color(0xFF25D3EE).withOpacity(0.28)
-      ..style = PaintingStyle.fill;
-    final paintStroke = Paint()
-      ..color = const Color(0xFF25D3EE)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-
-    final stepMs =
-        stepSamples / kSampleRate * 1000.0; // kSampleRate 來自 SingleTrackService
-    final dx = stepMs * pxPerMs;
-
-    final pathFill = Path()..moveTo(0, midY);
-    final pathStrokeTop = Path();
-    final pathStrokeBot = Path();
-
-    for (int i = 0; i < peaks.length; i++) {
-      final x = i * dx;
-      final a = (peaks[i] / 32768.0) * (s.height * 0.45);
-      final yTop = midY - a;
-      final yBot = midY + a;
-      if (i == 0) {
-        pathStrokeTop.moveTo(x, yTop);
-        pathStrokeBot.moveTo(x, yBot);
-      } else {
-        pathStrokeTop.lineTo(x, yTop);
-        pathStrokeBot.lineTo(x, yBot);
+  // 將毫秒轉為帶單位的字串（ms / s / m / h）
+  static String _fmtTimeUnit(int ms) {
+    if (ms < 1000) return '${ms}ms';
+    final sec = ms / 1000.0;
+    if (sec < 60) {
+      // 小於 10 秒顯示 1 位小數
+      if (sec < 10) {
+        return '${sec.toStringAsFixed(1)}s';
       }
-      pathFill.lineTo(x, yTop);
+      return '${sec.round()}s';
     }
-    final lastX = (peaks.length - 1) * dx;
-    pathFill
-      ..lineTo(lastX, midY)
-      ..lineTo(0, midY)
-      ..close();
-
-    c.drawPath(pathFill, paintFill);
-    c.drawPath(pathStrokeTop, paintStroke);
-    c.drawPath(
-      pathStrokeBot,
-      paintStroke..color = paintStroke.color.withOpacity(0.6),
-    );
+    final min = sec / 60.0;
+    if (min < 60) {
+      // 小於 10 分顯示 1 位小數
+      if (min < 10) {
+        return '${min.toStringAsFixed(1)}m';
+      }
+      return '${min.round()}m';
+    }
+    final hour = min / 60.0;
+    if (hour < 10) {
+      return '${hour.toStringAsFixed(1)}h';
+    }
+    return '${hour.round()}h';
   }
-
-  @override
-  bool shouldRepaint(covariant _WaveformPainter old) =>
-      old.peaks != peaks ||
-      old.stepSamples != stepSamples ||
-      old.pxPerMs != pxPerMs;
 }
+
+// （移除未使用的舊 _WaveformPainter，現改用視窗化畫家）
 
 class _WaveformWindowPainter extends CustomPainter {
   final EnvelopeLevel? env; // min/max 封包

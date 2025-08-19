@@ -98,7 +98,8 @@ class TrackLaneService {
     if (ctx == null) return;
 
     final dx = localDx - ctx.startDx;
-    final rawMs = (ctx.startMs + dx / pxPerMs).round().clamp(0, laneMs);
+    // 允許拖曳超出原本時限，僅限制不可小於 0
+    final rawMs = math.max(0, (ctx.startMs + dx / pxPerMs).round());
 
     editor.updateInteractiveDrag(
       track: ctx.track,
@@ -107,6 +108,7 @@ class TrackLaneService {
       excludeId: ctx.segment.id,
       snappingEnabled: snappingEnabled,
       pxPerMs: pxPerMs, // ★ 補上這個參數
+      laneMs: laneMs,
     );
   }
 

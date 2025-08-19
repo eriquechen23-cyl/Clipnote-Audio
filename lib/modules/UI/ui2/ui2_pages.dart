@@ -1,8 +1,11 @@
 // ui2_pages.dart
 // ignore_for_file: unnecessary_this
 
-import 'package:clipnote_audio/modules/editing/snapping.dart';
 import 'package:clipnote_audio/modules/services/track_lane_service.dart';
+import 'dart:math' as math;
+import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:clipnote_audio/modules/UI/ui2/ui2_primitives.dart'; // Glass
@@ -35,6 +38,14 @@ class _LinkedHScrollGroup {
   double get offset => _controllers.isNotEmpty && _controllers.first.hasClients
       ? _controllers.first.offset
       : 0.0;
+
+  void jumpTo(double offset) {
+    _syncing = true;
+    for (final c in _controllers) {
+      if (c.hasClients) c.jumpTo(offset);
+    }
+    _syncing = false;
+  }
 
   Future<void> animateTo(
     double offset, {
@@ -83,6 +94,12 @@ class TracksPage extends StatefulWidget {
   final bool canEdit;
   final MainEditorService editor;
   final double pxPerMs;
+  // 父層（MainEditorUI2）提供改變縮放的 setter
+  final ValueChanged<double> onSetPxPerMs;
+  // MiniBar 是否正在拖曳（用於暫停播放追隨並啟用拖曳追隨）
+  final bool isScrubbing;
+  // 共用的選取/拖曳服務（由父層提供，供剪刀等操作用）
+  final TrackLaneService laneSvc;
 
   const TracksPage({
     super.key,
@@ -94,6 +111,9 @@ class TracksPage extends StatefulWidget {
     required this.canEdit,
     required this.editor,
     required this.pxPerMs,
+    required this.onSetPxPerMs,
+    this.isScrubbing = false,
+    required this.laneSvc,
   });
 
   @override
@@ -106,7 +126,7 @@ class _TracksPageState extends State<TracksPage> {
   static const double _listPadR = 12;
   static const double _headerW = 280;
   static const double _gutterW = 8;
-  static const double _rowHeight = 160;
+  static const double _rowHeight = 120; // 縮小音軌列高
 
   // 連動的水平卷軸群組
   final _LinkedHScrollGroup _hGroup = _LinkedHScrollGroup();
@@ -117,17 +137,32 @@ class _TracksPageState extends State<TracksPage> {
   static const double _followBias = 0.35; // 播放頭維持在右側 35% 位置
   static const double _edgeMargin = 120;
   static const Duration _animDur = Duration(milliseconds: 120);
-  late final TrackLaneService _laneSvc; // ★ 共用：一次只選一個 lane
+  // 改由父層提供 laneSvc
 
   // _TracksPageState 內成員
   bool _laneTapCanceled = false; // 被長按/拖曳取消時，父層不做 seek
+  // 供播放頭覆蓋層偵測卷軸改變（避免整頁 setState）
+  final ValueNotifier<double> _scrollLeftVN = ValueNotifier(0);
+
+  // 兩指縮放狀態
+  bool _isPinching = false;
+  double _scaleStartPxPerMs = 0.0;
+  double _scaleStartScrollLeft = 0.0;
+  // 縮放區域 UI 提示/強調
+  bool _showZoomHint = true;
+  bool _hoverZoom = false;
+  Timer? _zoomHintTimer;
 
   @override
   void initState() {
     super.initState();
     widget.editor.playhead.addListener(_onTick);
     widget.editor.playing.addListener(_maybeAutoFollow);
-    _laneSvc = TrackLaneService(widget.editor); // ★ 父層只建一次
+    // 幾秒後自動隱藏提示
+    _zoomHintTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted) return;
+      setState(() => _showZoomHint = false);
+    });
   }
 
   @override
@@ -135,20 +170,24 @@ class _TracksPageState extends State<TracksPage> {
     super.didUpdateWidget(oldWidget);
     // 軌數改變時，調整控制器數量
     _hGroup.ensureCount(widget.tracks.length);
+    if (oldWidget.isScrubbing != widget.isScrubbing) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoFollow());
+    }
   }
 
   @override
   void dispose() {
     widget.editor.playhead.removeListener(_onTick);
     widget.editor.playing.removeListener(_maybeAutoFollow);
-    _laneSvc.dispose(); // ★ 新增：釋放 notifiers
     _hGroup.dispose();
+    _zoomHintTimer?.cancel();
+    _scrollLeftVN.dispose();
     super.dispose();
   }
 
   void _onTick() {
     if (!mounted) return;
-    setState(() {}); // 讓公共紅線即時更新
+    // 避免整頁 rebuild，交由覆蓋層 AnimatedBuilder 更新紅線
     _maybeAutoFollow();
   }
 
@@ -164,7 +203,10 @@ class _TracksPageState extends State<TracksPage> {
 
   void _maybeAutoFollow() {
     if (!mounted) return;
-    if (!widget.editor.isPlaying || _viewportRightW <= 0) return;
+    // 播放或 MiniBar 拖曳時才追隨
+    final shouldFollow = widget.editor.isPlaying || widget.isScrubbing;
+    if (!shouldFollow || _viewportRightW <= 0) return;
+    if (_isPinching) return; // 縮放中不自動追隨
     if (_userHScrolling) return;
 
     final contentW = _ms2x(_laneMs) + 40;
@@ -186,48 +228,7 @@ class _TracksPageState extends State<TracksPage> {
     _hGroup.animateTo(targetLeft, duration: _animDur, curve: Curves.easeOut);
   }
 
-  void _onLaneTapDown({
-    required String laneId,
-    required TapDownDetails details,
-    required BuildContext areaCtx,
-  }) {
-    final isSelectedLane = _laneSvc.selectedLaneId.value == laneId;
-
-    // 第一次點：只選取；第二次（已選取）才移動播放頭
-    if (!isSelectedLane) {
-      _laneSvc.selectLane(laneId);
-      return;
-    }
-
-    // 取得在「音軌可視區」中的 x（px）
-    final box = areaCtx.findRenderObject() as RenderBox?;
-    if (box == null) return;
-    final local = box.globalToLocal(details.globalPosition);
-    final dx = local.dx;
-
-    // 轉成世界座標與時間（毫秒）
-    final worldX = _hGroup.offset + dx;
-    int ms = (worldX / widget.pxPerMs).round();
-    ms = ms.clamp(0, _laneMs); // 不超出長度
-
-    // 移動播放頭（交給父層/服務）
-    widget.onSeekMs(ms);
-
-    // 若目前是暫停狀態，順帶把播放頭滾進視窗（與自動追隨一致的邏輯）
-    if (!widget.editor.isPlaying && _viewportRightW > 0) {
-      final contentW = _ms2x(_laneMs) + 40;
-      final maxScroll = contentW - _viewportRightW;
-      if (maxScroll > 0) {
-        double targetLeft = worldX - _viewportRightW * _followBias;
-        targetLeft = targetLeft.clamp(0.0, maxScroll);
-        _hGroup.animateTo(
-          targetLeft,
-          duration: _animDur,
-          curve: Curves.easeOut,
-        );
-      }
-    }
-  }
+  // （移除未用的 _onLaneTapDown，拆成 select/seek 流程）
 
   // ===== 新增：小工具，從 global 位置換算成 ms =====
   int _globalPositionToMs({
@@ -247,8 +248,8 @@ class _TracksPageState extends State<TracksPage> {
 
   // ===== 取代原本的 _onLaneTapDown：拆兩個 =====
   void _onLaneTapDownSelect({required String laneId}) {
-    final isSelected = _laneSvc.selectedLaneId.value == laneId;
-    if (!isSelected) _laneSvc.selectLane(laneId); // 只有選取，不移動播放頭
+    final isSelected = widget.laneSvc.selectedLaneId.value == laneId;
+    if (!isSelected) widget.laneSvc.selectLane(laneId); // 只有選取，不移動播放頭
   }
 
   void _onLaneTapUpSeek({
@@ -256,9 +257,9 @@ class _TracksPageState extends State<TracksPage> {
     required TapUpDetails details,
     required BuildContext areaCtx,
   }) {
-    if (_laneTapCanceled || _laneSvc.isDragging) return;
+    if (_laneTapCanceled || widget.laneSvc.isDragging) return;
     // 只有「點擊且已選取的 lane」才移動播放頭；長按/拖曳不會觸發 onTapUp
-    final isSelected = _laneSvc.selectedLaneId.value == laneId;
+    final isSelected = widget.laneSvc.selectedLaneId.value == laneId;
     if (!isSelected) return;
 
     final ms = _globalPositionToMs(
@@ -288,197 +289,12 @@ class _TracksPageState extends State<TracksPage> {
     }
   }
 
-  // 放在 _TracksPageState 裡，任一方法之上都可
-  Widget _liftIfDragging({required Widget child, required bool lift}) {
-    return TweenAnimationBuilder<double>(
-      duration: const Duration(milliseconds: 140),
-      curve: Curves.easeOutCubic,
-      tween: Tween(begin: 0, end: lift ? 1 : 0),
-      builder: (_, t, __) {
-        final dy = -10.0 * t; // 位移：-10px
-        final scale = 1.0 + 0.03 * t; // 縮放：+3%
-        final br = 12.0; // 外框圓角
+  // 原本的拖曳浮起動畫已移除
 
-        return Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Transform.translate(
-              offset: Offset(0, dy),
-              child: Transform.scale(
-                scale: scale,
-                alignment: Alignment.center,
-                child: Container(
-                  // 外部陰影 + 青色外發光
-                  decoration: BoxDecoration(
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.65 * t),
-                        blurRadius: 28 * t,
-                        spreadRadius: 2 * t,
-                        offset: Offset(0, 10 * t),
-                      ),
-                      BoxShadow(
-                        color: const Color(0xFF22D3EE).withOpacity(0.40 * t),
-                        blurRadius: 38 * t,
-                        spreadRadius: 2 * t,
-                      ),
-                    ],
-                  ),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 140),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(br),
-                      border: Border.all(
-                        color: const Color(0xFF22D3EE).withOpacity(0.95 * t),
-                        width: 2.0 * t, // 浮起時出現 2px 青色外框
-                      ),
-                    ),
-                    child: child,
-                  ),
-                ),
-              ),
-            ),
-            if (t > 0)
-              // 上緣淡淡高光，讓「浮起」更立體
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(br),
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.white.withOpacity(0.06 * t),
-                          Colors.transparent,
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildTrackRow({
-    required int index,
-    required String laneId,
-    required SingleTrackService trackSvc,
-    required bool isSelectedLane,
-  }) {
-    return SizedBox(
-      height: _rowHeight,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: isSelectedLane
-                ? const Color(0x1A22D3EE)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // ← 左邊把手 + Header（用把手啟動父層重排）
-              SizedBox(
-                width: _headerW,
-                child: Row(
-                  children: [
-                    ReorderableDragStartListener(
-                      index: index,
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 8),
-                        child: Icon(
-                          Icons.drag_handle_rounded,
-                          color: Colors.white70,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => _laneSvc.selectLane(laneId),
-                        child: _TrackHeader(
-                          index: index,
-                          name: trackSvc.name,
-                          color: trackSvc.color,
-                          isMuted: widget.editor.trackMuted(index),
-                          gain: widget.editor.trackGain(index),
-                          onToggleMute: () =>
-                              widget.editor.toggleTrackMute(index),
-                          onDelete: () => widget.onDeleteTrack(index),
-                          onGainChanged: (v) =>
-                              widget.editor.setTrackGain(index, v),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: _gutterW),
-
-              // 右側 Lane（維持你原本的 TrackLane）
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: Builder(
-                    builder: (areaCtx) => GestureDetector(
-                      behavior:
-                          HitTestBehavior.deferToChild, // 讓子元件優先（長按/拖曳會取消父 tap）
-                      onTapDown: (_) {
-                        _laneTapCanceled = false; // 新增：預設不取消
-                        _onLaneTapDownSelect(laneId: laneId); // 只做「選軌」
-                      },
-                      onTapCancel: () {
-                        // 新增：被長按或拖曳搶走時會進來
-                        _laneTapCanceled = true;
-                      },
-                      onTapUp: (d) => _onLaneTapUpSeek(
-                        // 只有沒被取消才會 Seek（見第 3 步）
-                        laneId: laneId,
-                        details: d,
-                        areaCtx: areaCtx,
-                      ),
-                      child: TrackLane(
-                        laneId: laneId,
-                        laneSvc: _laneSvc,
-                        track: trackSvc,
-                        editor: widget.editor,
-                        pxPerMs: widget.pxPerMs,
-                        durationMs: widget.durationMs,
-                        canEdit: widget.canEdit,
-                        scrollController: _hGroup.controllerAt(index),
-                        showPlayhead: false,
-                        autoFollow: false,
-                        // ★ 用水平拖移動片段；長按留給切割選單
-                        dragMode: TrackLaneDragMode.horizontal,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  // （移除未用的舊 _buildTrackRow，現已內嵌 builder 做動畫）
 
   // ★ 小工具：在指定 x（整頁座標）畫 1px 青色直線
-  Widget _snapLine(double left) {
-    return Positioned(
-      left: left,
-      top: 0,
-      bottom: 0,
-      child: IgnorePointer(
-        child: Container(width: 1, color: Colors.cyanAccent.withOpacity(0.85)),
-      ),
-    );
-  }
+  // （移除未用的 _snapLine）
 
   @override
   Widget build(BuildContext context) {
@@ -491,10 +307,9 @@ class _TracksPageState extends State<TracksPage> {
             c.maxWidth - _listPadL - _listPadR - _headerW - _gutterW;
 
         // 公共紅線位置（世界座標 → 視窗座標）
-        final scrollX = _hGroup.offset;
-        final worldX = _ms2x(widget.editor.playheadMs).toDouble();
-        final localX = worldX - scrollX;
-        final overlayLeft = _listPadL + _headerW + _gutterW + localX;
+        // 避免不必要的中間變數，實際位置於下方 AnimatedBuilder 計算
+        // 對齊整數像素，避免半像素造成視覺偏移
+        // 紅色播放頭的位置改由下方 AnimatedBuilder 動態計算
 
         return Stack(
           children: [
@@ -513,6 +328,8 @@ class _TracksPageState extends State<TracksPage> {
                     });
                   }
                 }
+                // 每次水平捲動都更新覆蓋層的位置（避免整頁 setState）
+                _scrollLeftVN.value = _hGroup.offset;
                 return false;
               },
               child: ReorderableListView.builder(
@@ -536,13 +353,12 @@ class _TracksPageState extends State<TracksPage> {
                   return AnimatedBuilder(
                     key: ValueKey(laneId), // ★ Reorderable 需要穩定 key
                     animation: Listenable.merge([
-                      _laneSvc.selectedLaneId, // 切換選軌時重建
-                      _laneSvc.dragging, // ★ 拖曳期間重建 → 觸發浮起動畫
+                      widget.laneSvc.selectedLaneId, // 切換選軌時重建
+                      widget.laneSvc.dragging, // ★ 拖曳期間重建 → 觸發浮起動畫
                     ]),
                     builder: (_, __) {
                       final isSelectedLane =
-                          _laneSvc.selectedLaneId.value == laneId;
-                      final isFloating = isSelectedLane && _laneSvc.isDragging;
+                          widget.laneSvc.selectedLaneId.value == laneId;
 
                       final row = SizedBox(
                         height: _rowHeight,
@@ -579,7 +395,7 @@ class _TracksPageState extends State<TracksPage> {
                                         child: GestureDetector(
                                           behavior: HitTestBehavior.opaque,
                                           onTap: () =>
-                                              _laneSvc.selectLane(laneId),
+                                              widget.laneSvc.selectLane(laneId),
                                           child: _TrackHeader(
                                             index: i,
                                             name: trackSvc.name,
@@ -594,6 +410,10 @@ class _TracksPageState extends State<TracksPage> {
                                                 widget.onDeleteTrack(i),
                                             onGainChanged: (v) => widget.editor
                                                 .setTrackGain(i, v),
+                                            onSeparateVocal: () async {
+                                              await widget.editor
+                                                  .separateVocalInstrument(i);
+                                            },
                                           ),
                                         ),
                                       ),
@@ -621,8 +441,8 @@ class _TracksPageState extends State<TracksPage> {
                                         ),
                                         child: TrackLane(
                                           laneId: laneId, // ★ 傳唯一 ID
-                                          laneSvc:
-                                              _laneSvc, // ★ 共用 service（單一選取）
+                                          laneSvc: widget
+                                              .laneSvc, // ★ 共用 service（單一選取）
                                           track: trackSvc,
                                           editor: widget.editor,
                                           pxPerMs: widget.pxPerMs,
@@ -634,6 +454,8 @@ class _TracksPageState extends State<TracksPage> {
                                           autoFollow: false, // 由父層統一追隨
                                           dragMode:
                                               TrackLaneDragMode.horizontal,
+                                          // 父層手勢縮放時自行維持錨點，避免子元件也做錨點調整
+                                          maintainPlayheadOnZoom: false,
                                         ),
                                       ),
                                     ),
@@ -645,22 +467,225 @@ class _TracksPageState extends State<TracksPage> {
                         ),
                       );
 
-                      return _liftIfDragging(child: row, lift: isFloating);
+                      // 移除拖曳時整條音軌浮起效果，直接回傳內容
+                      return row;
                     },
                   );
                 },
               ),
             ),
 
-            // ui2_pages.dart（_TracksPageState.build 裡的 Stack）
-            /* 仍保留你的紅色播放頭 */
+            // ===== 縮放手勢捕捉層（僅覆蓋右側編輯區，不遮住左側欄位） =====
             Positioned(
-              left: overlayLeft,
+              left: _listPadL + _headerW + _gutterW,
+              right: _listPadR,
               top: 0,
               bottom: 0,
-              child: IgnorePointer(
-                child: Container(width: 2, color: Colors.redAccent),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: _hoverZoom
+                        ? const Color(0x558BC7FF)
+                        : const Color(0x2222D3EE),
+                    width: 1.0,
+                  ),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: MouseRegion(
+                  onEnter: (_) => setState(() => _hoverZoom = true),
+                  onExit: (_) => setState(() => _hoverZoom = false),
+                  child: Listener(
+                    onPointerSignal: (event) {
+                      // Ctrl + 滑鼠滾輪 → 縮放
+                      if (event is! PointerScrollEvent) return;
+                      final keys = RawKeyboard.instance.keysPressed;
+                      final ctrl =
+                          keys.contains(LogicalKeyboardKey.controlLeft) ||
+                          keys.contains(LogicalKeyboardKey.controlRight);
+                      if (!ctrl) return;
+
+                      // 計算縮放倍率（滑輪上捲放大、下捲縮小）
+                      final dy = event.scrollDelta.dy; // Windows 往上多為負值
+                      if (dy == 0) return;
+                      final scaleFactor = math.exp(-dy * 0.0025); // 平滑指數縮放
+                      if (_showZoomHint) setState(() => _showZoomHint = false);
+
+                      final laneMs = _laneMs;
+                      final minWindowMs = 50;
+                      final maxWindowMs = 1_800_000;
+                      final minPxPerMs = _viewportRightW > 0
+                          ? (_viewportRightW / maxWindowMs)
+                          : 0.001;
+                      final maxPxPerMs = _viewportRightW > 0
+                          ? (_viewportRightW / minWindowMs)
+                          : 10.0;
+
+                      // 轉局部座標（相對於此區塊）
+                      final rb = (context.findRenderObject() as RenderBox?);
+                      if (rb == null) return;
+                      final local = rb.globalToLocal(event.position);
+                      final localX = local.dx;
+
+                      final startPxPerMs = widget.pxPerMs;
+                      final startScroll = _hGroup.offset;
+                      double newPxPerMs = (startPxPerMs * scaleFactor).clamp(
+                        minPxPerMs,
+                        maxPxPerMs,
+                      );
+
+                      // 以指標位置為錨點
+                      final msAtFocal = (startScroll + localX) / startPxPerMs;
+                      final newLeft = (msAtFocal * newPxPerMs) - localX;
+                      final contentW = newPxPerMs * laneMs + 40;
+                      final maxScroll = (contentW - _viewportRightW)
+                          .clamp(0, double.infinity)
+                          .toDouble();
+                      final clampedLeft = newLeft
+                          .clamp(0.0, maxScroll)
+                          .toDouble();
+
+                      _hGroup.jumpTo(clampedLeft);
+                      widget.onSetPxPerMs(newPxPerMs);
+                    },
+                    child: Stack(
+                      children: [
+                        // 手勢層
+                        GestureDetector(
+                          behavior: HitTestBehavior.translucent,
+                          onScaleStart: (d) {
+                            // 兩指縮放一開始就取消本次點擊對 lane 的選取/seek 影響
+                            _laneTapCanceled = true;
+                            _isPinching = true;
+                            _scaleStartPxPerMs = widget.pxPerMs;
+                            _scaleStartScrollLeft = _hGroup.offset;
+                          },
+                          onScaleUpdate: (d) {
+                            // 僅在雙指以上時進行縮放，避免影響單指拖曳/點擊
+                            if (d.pointerCount < 2) return;
+                            final scale = d.scale;
+                            // 以內容長度給定最小縮放（整段全見），最大縮放（細看）
+                            final laneMs = _laneMs;
+                            // 對應可見時間窗：最小 50ms、最大 30 分鐘
+                            final minWindowMs = 50;
+                            final maxWindowMs = 1_800_000;
+                            final minPxPerMs = _viewportRightW > 0
+                                ? (_viewportRightW / maxWindowMs)
+                                : 0.001; // 非 0 保底
+                            final maxPxPerMs = _viewportRightW > 0
+                                ? (_viewportRightW / minWindowMs)
+                                : 10.0;
+                            double newPxPerMs = (_scaleStartPxPerMs * scale)
+                                .clamp(minPxPerMs, maxPxPerMs);
+
+                            // 以焦點當錨：維持「焦點下的時間」不動
+                            final localX = d.localFocalPoint.dx; // 右側區域內的 x
+                            final msAtFocal =
+                                (_scaleStartScrollLeft + localX) /
+                                _scaleStartPxPerMs;
+                            final newLeft = (msAtFocal * newPxPerMs) - localX;
+
+                            final contentW = newPxPerMs * laneMs + 40;
+                            final maxScroll = (contentW - _viewportRightW)
+                                .clamp(0, double.infinity)
+                                .toDouble();
+                            final clampedLeft = newLeft
+                                .clamp(0.0, maxScroll)
+                                .toDouble();
+
+                            // 先設定卷軸位置，再更新縮放（或相反順序都可；這裡先設卷軸更平滑）
+                            _hGroup.jumpTo(clampedLeft);
+                            widget.onSetPxPerMs(newPxPerMs);
+                          },
+                          onScaleEnd: (d) {
+                            _isPinching = false;
+                            // 放開後恢復點擊
+                            _laneTapCanceled = false;
+                            if (_showZoomHint)
+                              setState(() => _showZoomHint = false);
+                          },
+                        ),
+                        // 提示層（不攔截事件）
+                        if (_showZoomHint)
+                          Positioned(
+                            right: 12,
+                            top: 12,
+                            child: IgnorePointer(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xCC0F141E),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: const Color(0x3322D3EE),
+                                  ),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Colors.black54,
+                                      blurRadius: 10,
+                                      offset: Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: const [
+                                      Icon(
+                                        Icons.zoom_in_map,
+                                        size: 16,
+                                        color: Colors.white70,
+                                      ),
+                                      SizedBox(width: 6),
+                                      Text(
+                                        '縮放區域  •  Ctrl+滾輪 / 雙指縮放',
+                                        style: TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
+            ),
+
+            // 紅色播放頭（僅自身重建）：跟隨 playhead 與水平卷軸
+            AnimatedBuilder(
+              animation: Listenable.merge([
+                widget.editor.playhead,
+                _scrollLeftVN,
+              ]),
+              builder: (context, _) {
+                final scrollX = _hGroup.offset;
+                final worldX = _ms2x(widget.editor.playheadMs).toDouble();
+                final localX = worldX - scrollX;
+                final left = (_listPadL + _headerW + _gutterW + localX)
+                    .roundToDouble();
+                return Positioned(
+                  left: left,
+                  top: 0,
+                  bottom: 0,
+                  child: const IgnorePointer(
+                    child: RepaintBoundary(
+                      child: SizedBox(
+                        width: 2,
+                        child: ColoredBox(color: Colors.redAccent),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
 
             // === 磁吸導引線（跨所有軌）===
@@ -682,7 +707,8 @@ class _TracksPageState extends State<TracksPage> {
                   final scrollX = _hGroup.offset;
                   final worldX = _ms2x(ms).toDouble();
                   final localX = worldX - scrollX;
-                  return _listPadL + _headerW + _gutterW + localX;
+                  return (_listPadL + _headerW + _gutterW + localX)
+                      .roundToDouble();
                 }
 
                 final joinLeft = _msToOverlayLeft(guide.ms);
@@ -739,6 +765,7 @@ class _TrackHeader extends StatelessWidget {
   final VoidCallback onToggleMute;
   final VoidCallback onDelete;
   final ValueChanged<double> onGainChanged;
+  final Future<void> Function() onSeparateVocal;
 
   const _TrackHeader({
     required this.index,
@@ -749,6 +776,7 @@ class _TrackHeader extends StatelessWidget {
     required this.onToggleMute,
     required this.onDelete,
     required this.onGainChanged,
+    required this.onSeparateVocal,
   });
 
   @override
@@ -802,6 +830,15 @@ class _TrackHeader extends StatelessWidget {
                 tooltip: '靜音',
                 active: isMuted,
                 onTap: onToggleMute,
+              ),
+              const SizedBox(width: 8),
+              _PillButton(
+                label: '去人聲',
+                tooltip: '中心相消 + 中心保留（產生兩條新軌）',
+                active: false,
+                onTap: () async {
+                  await onSeparateVocal();
+                },
               ),
               const SizedBox(width: 10),
               const Icon(Icons.volume_up, size: 16, color: Colors.white70),
