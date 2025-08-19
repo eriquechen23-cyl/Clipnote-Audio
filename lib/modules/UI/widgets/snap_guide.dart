@@ -17,7 +17,7 @@ class SnapGuideLayer extends StatelessWidget {
       valueListenable: guide,
       builder: (_, gp, __) {
         if (gp == null) return const SizedBox.shrink();
-        final x = msToPx(gp.ms);
+        final x = msToPx(gp.ms).roundToDouble();
         return IgnorePointer(
           ignoring: true,
           child: CustomPaint(
@@ -42,7 +42,9 @@ class _GuidePainter extends CustomPainter {
       ..strokeWidth = 1.5;
 
     // 垂直線
-    canvas.drawLine(Offset(x, 0), Offset(x, size.height), p);
+    // 對齊像素避免模糊
+    final xr = x.roundToDouble();
+    canvas.drawLine(Offset(xr, 0), Offset(xr, size.height), p);
 
     // 小標籤
     final tp = TextPainter(
@@ -53,7 +55,7 @@ class _GuidePainter extends CustomPainter {
       textDirection: TextDirection.ltr,
     )..layout();
 
-    final ox = (x + 6 + tp.width < size.width) ? x + 6 : (x - 6 - tp.width);
+    final ox = (xr + 6 + tp.width < size.width) ? xr + 6 : (xr - 6 - tp.width);
     final oy = 6.0;
     tp.paint(canvas, Offset(ox, oy));
   }

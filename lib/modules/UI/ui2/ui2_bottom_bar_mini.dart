@@ -6,10 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:clipnote_audio/modules/services/track_lane_service.dart'
     show TimelineScale, kTimelineScaleOrder, TimelineScaleX;
 // MiniFooterBar — draggable scrub
-import 'dart:ui' show FontFeature, ImageFilter;
-import 'package:flutter/material.dart';
-import 'package:clipnote_audio/modules/services/track_lane_service.dart'
-    show TimelineScale, kTimelineScaleOrder;
 
 class MiniFooterBar extends StatefulWidget {
   final bool isPlaying;
@@ -22,6 +18,13 @@ class MiniFooterBar extends StatefulWidget {
   final TimelineScale currentScale;
   final ValueChanged<TimelineScale> onSetScale;
   final bool compact;
+  // 通知外部：開始/結束拖曳時間條（用於同步視窗捲動）
+  final VoidCallback? onScrubStart;
+  final VoidCallback? onScrubEnd;
+  // 剪刀：在播放頭切段
+  final VoidCallback? onCutAtPlayhead;
+  // 刪除目前選取的片段（Segment）
+  final VoidCallback? onDeleteSelectedSegment;
 
   const MiniFooterBar({
     super.key,
@@ -35,6 +38,10 @@ class MiniFooterBar extends StatefulWidget {
     required this.currentScale,
     required this.onSetScale,
     this.compact = true,
+    this.onScrubStart,
+    this.onScrubEnd,
+    this.onCutAtPlayhead,
+    this.onDeleteSelectedSegment,
   });
 
   @override
@@ -45,7 +52,7 @@ class _MiniFooterBarState extends State<MiniFooterBar> {
   // 拖曳暫存（0..1）
   double? _dragV;
 
-  bool get _isScrubbing => _dragV != null;
+  // 內部狀態由 _dragV 判斷是否在拖曳，不需外露 getter
   bool _resumeAfterScrub = false; // 拖曳前正在播？結束後要續播
   DateTime _lastSeekSentAt = DateTime.fromMillisecondsSinceEpoch(0); // 節流時間戳
   @override
@@ -106,6 +113,26 @@ class _MiniFooterBarState extends State<MiniFooterBar> {
                           iconSize: iconSz,
                         ),
                         const SizedBox(width: 8),
+                        // 剪刀按鈕
+                        NeonButton(
+                          icon: Icons.content_cut_rounded,
+                          label: narrow ? null : '剪刀',
+                          baseColor: const Color(0xFFFF6EA6),
+                          dense: true,
+                          onPressed: widget.onCutAtPlayhead ?? () {},
+                          iconSize: iconSz,
+                        ),
+                        const SizedBox(width: 8),
+                        // 刪段按鈕（刪除目前選取的片段）
+                        NeonButton(
+                          icon: Icons.delete_forever_rounded,
+                          label: narrow ? null : '刪段',
+                          baseColor: const Color(0xFFFF5252),
+                          dense: true,
+                          onPressed: widget.onDeleteSelectedSegment ?? () {},
+                          iconSize: iconSz,
+                        ),
+                        const SizedBox(width: 8),
                         NeonRoundButton(
                           onPressed: widget.onPlayPause,
                           icon: widget.isPlaying
@@ -141,6 +168,9 @@ class _MiniFooterBarState extends State<MiniFooterBar> {
                               onChangeStart: canScrub
                                   ? (nv) {
                                       setState(() => _dragV = nv);
+                                      if (widget.onScrubStart != null) {
+                                        widget.onScrubStart!();
+                                      }
                                       if (widget.isPlaying) {
                                         _resumeAfterScrub = true;
                                         widget.onPlayPause(); // 暫停
@@ -180,6 +210,9 @@ class _MiniFooterBarState extends State<MiniFooterBar> {
                                       if (_resumeAfterScrub) {
                                         _resumeAfterScrub = false;
                                         widget.onPlayPause(); // 續播
+                                      }
+                                      if (widget.onScrubEnd != null) {
+                                        widget.onScrubEnd!();
                                       }
                                     }
                                   : null,

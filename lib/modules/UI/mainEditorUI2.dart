@@ -25,6 +25,7 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
   // 時間軸縮放（TracksPage 用）
   double _pxPerMs = 0.20;
   double _rightViewportWidthPx = 0; // 由 LayoutBuilder 寫入
+  bool _isScrubbing = false; // Mini bar 拖曳狀態
   @override
   void initState() {
     super.initState();
@@ -41,22 +42,15 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
     return nearestScaleForWindowMs(windowMs);
   }
 
-  // —— 計算右側「可見編輯區」的寬度（px）——
-  // 要跟 TracksPage 的常數同步：_listPadL/_listPadR/_headerW/_gutterW
-  double _rightViewportWidth(BuildContext ctx) {
-    final w = MediaQuery.of(ctx).size.width;
-    const listPadL = 12.0;
-    const listPadR = 12.0;
-    const headerW = 280.0;
-    const gutterW = 8.0;
-    return w - 2 * _outerPad - listPadL - listPadR - headerW - gutterW;
-  }
+  // （移除未使用的 _rightViewportWidth 計算）
 
   // 套用縮放（以「可見寬度」換算新的 _pxPerMs）
   // 這個最小版不處理「以播放頭為錨捲動」，先能切再說；在播放中自動追隨會補上視覺位置。
   void _applyScale(TimelineScale s) {
     final vw = _rightViewportWidthPx > 0 ? _rightViewportWidthPx : 1.0;
-    final newPxPerMs = vw / s.windowMs;
+    // 限制視窗可見時間範圍：最精細 0.05s（50ms），最粗 30m（1800000ms）
+    final clampedWindowMs = s.windowMs.clamp(50, 1_800_000);
+    final newPxPerMs = vw / clampedWindowMs;
     if ((newPxPerMs - _pxPerMs).abs() > 1e-6) {
       setState(() => _pxPerMs = newPxPerMs); // ★ 觸發重建
     }
@@ -156,6 +150,12 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
                                 canEdit: !svc.isPlaying,
                                 editor: svc,
                                 pxPerMs: _pxPerMs,
+                                onSetPxPerMs: (v) => setState(() {
+                                  _pxPerMs = v;
+                                }),
+                                isScrubbing: _isScrubbing,
+                                laneSvc: laneSvc,
+                                // 交給 TracksPage，內部會根據 _isScrubbing 停用追隨
                               );
                             },
                           );
@@ -173,7 +173,11 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
                       12,
                     ),
                     child: AnimatedBuilder(
-                      animation: Listenable.merge([svc.playing, svc.playhead]),
+                      animation: Listenable.merge([
+                        svc.playing,
+                        svc.playhead,
+                        laneSvc.selectedSegmentId,
+                      ]),
                       builder: (_, __) => MiniFooterBar(
                         isPlaying: svc.isPlaying,
                         positionMs: svc.playheadMs,
@@ -184,15 +188,135 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
                         onExport: _handleExport,
                         currentScale: _nearestScale(),
                         onSetScale: _applyScale,
+                        onScrubStart: () => setState(() => _isScrubbing = true),
+                        onScrubEnd: () => setState(() => _isScrubbing = false),
+                        onCutAtPlayhead: _handleCutAtPlayhead,
+                        onDeleteSelectedSegment:
+                            laneSvc.selectedSegmentId.value != null
+                            ? _handleDeleteSelectedSegment
+                            : null,
                       ),
                     ),
                   ),
                 ],
               ),
             ),
+
+          // 全域阻擋層：長任務期間顯示 LOADING 並阻止所有操作
+          AnimatedBuilder(
+            animation: svc.busy,
+            builder: (context, _) {
+              if (!svc.busy.value) return const SizedBox.shrink();
+              return Stack(
+                children: [
+                  ModalBarrier(
+                    dismissible: false,
+                    color: Colors.black.withOpacity(0.35),
+                  ),
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xCC121621),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white10),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black54,
+                            blurRadius: 18,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          SizedBox(width: 12),
+                          Text(
+                            '處理中，請稍候…',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
         ],
       ),
     );
+  }
+
+  Future<void> _handleCutAtPlayhead() async {
+    // 只在選到某個 lane 時動作
+    final laneId = laneSvc.selectedLaneId.value;
+    if (laneId == null) return;
+    final idx = int.tryParse(laneId.split('-').last);
+    if (idx == null || idx < 0 || idx >= svc.tracks.length) return;
+    final track = svc.tracks[idx];
+
+    final ms = svc.playheadMs;
+    final seg = track.segmentAtMs(ms);
+    if (seg == null) return;
+
+    final res = track.splitSegment(seg, ms);
+    if (res == null) return;
+
+    // 立即重建本軌與波形，主混音排程處理（避免卡 UI）
+    track.rebuildRenderedNow();
+    track.buildDownsampledWaveform(step: 128);
+    svc.scheduleRebuild();
+
+    // 選取右段，體感較好
+    laneSvc.selectSegment(laneId: laneId, segId: res.right.id);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _handleDeleteSelectedSegment() async {
+    // 必須選到某個 lane 與 segment
+    final laneId = laneSvc.selectedLaneId.value;
+    final segId = laneSvc.selectedSegmentId.value;
+    if (laneId == null || segId == null) return;
+
+    final idx = int.tryParse(laneId.split('-').last);
+    if (idx == null || idx < 0 || idx >= svc.tracks.length) return;
+    final track = svc.tracks[idx];
+
+    final segs = track.track.segments;
+    final i = segs.indexWhere((s) => s.id == segId);
+    if (i < 0) return;
+    final seg = segs[i];
+
+    // 刪除該段，刷新本軌與波形，主混音改排程
+    track.removeSegment(seg);
+    track.rebuildRenderedNow();
+    track.buildDownsampledWaveform(step: 128);
+    svc.scheduleRebuild();
+
+    // 重新選取鄰近片段（若還有）
+    if (segs.isNotEmpty) {
+      final nextIdx = (i >= segs.length) ? segs.length - 1 : i;
+      laneSvc.selectSegment(laneId: laneId, segId: segs[nextIdx].id);
+    } else {
+      // 清空該 lane 的段選取
+      laneSvc.selectedSegmentId.value = null;
+    }
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('已刪除 1 段')));
+    setState(() {});
   }
 
   Future<void> _handleImport() async {
@@ -216,6 +340,10 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
       AudioExportFormat.wav => 0,
     };
 
+    // 先詢問檔名（不含副檔名）
+    final baseName = await _askExportFileName(context, fmt);
+    if (baseName == null) return; // 使用者取消
+
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -226,7 +354,7 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
       final where = await svc.exportMixToDownloads(
         format: fmt,
         bitrateKbps: bitrate,
-        suggestFileName: 'clipnote_mix',
+        suggestFileName: baseName,
       );
       if (!mounted) return;
       Navigator.pop(context);
@@ -240,6 +368,79 @@ class _MainEditorUI2State extends State<MainEditorUI2> {
         context,
       ).showSnackBar(SnackBar(content: Text('匯出失敗：$e')));
     }
+  }
+
+  Future<String?> _askExportFileName(
+    BuildContext ctx,
+    AudioExportFormat fmt,
+  ) async {
+    final ctrl = TextEditingController(text: 'clipnote_mix');
+    String? result = await showDialog<String>(
+      context: ctx,
+      builder: (dCtx) => AlertDialog(
+        backgroundColor: const Color(0xFF121621),
+        title: const Text('輸入檔名', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: '不要加副檔名（例如：clipnote_mix）',
+            hintStyle: TextStyle(color: Colors.white54),
+            enabledBorder: UnderlineInputBorder(
+              borderSide: BorderSide(color: Colors.white24),
+            ),
+            focusedBorder: UnderlineInputBorder(
+              borderSide: BorderSide(color: Color(0xFF41D9FF)),
+            ),
+          ),
+          onSubmitted: (v) {
+            final cleaned = _sanitizeFileNameBase(_stripExtForFormat(v, fmt));
+            if (cleaned.isNotEmpty) Navigator.pop(dCtx, cleaned);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx, null),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final cleaned = _sanitizeFileNameBase(
+                _stripExtForFormat(ctrl.text, fmt),
+              );
+              if (cleaned.isEmpty) return;
+              Navigator.pop(dCtx, cleaned);
+            },
+            child: const Text('確定'),
+          ),
+        ],
+      ),
+    );
+    return result;
+  }
+
+  String _stripExtForFormat(String name, AudioExportFormat fmt) {
+    var n = name.trim();
+    final ext = switch (fmt) {
+      AudioExportFormat.mp3 => '.mp3',
+      AudioExportFormat.m4a => '.m4a',
+      AudioExportFormat.wav => '.wav',
+    };
+    if (n.toLowerCase().endsWith(ext)) {
+      n = n.substring(0, n.length - ext.length);
+    }
+    return n;
+  }
+
+  String _sanitizeFileNameBase(String input) {
+    final s = input.trim();
+    if (s.isEmpty) return '';
+    // 移除不合法字元（跨平台）：\\ / : * ? " < > |
+    final forbidden = RegExp(r'[\\/:*?"<>|]');
+    final cleaned = s.replaceAll(forbidden, '_');
+    // 也避免結尾的點或空白
+    return cleaned.replaceAll(RegExp(r'[\s\.]+$'), '');
   }
 
   Future<AudioExportFormat?> _chooseExportFormat(BuildContext ctx) {

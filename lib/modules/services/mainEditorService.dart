@@ -9,7 +9,6 @@ import 'dart:math' as math;
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
-import 'package:file_saver/file_saver.dart';
 import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -21,8 +20,8 @@ import 'package:clipnote_audio/modules/playback/playbackService.dart';
 // 自動對位（磁吸）
 import 'package:clipnote_audio/modules/editing/snapping.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
 
 enum AudioExportFormat { mp3, m4a, wav }
@@ -61,9 +60,13 @@ class MainEditorService extends ChangeNotifier {
 
   // ===== 狀態 =====
   final List<SingleTrackService> tracks = [];
+  // 長任務 Busy 狀態（UI 顯示遮罩並阻止操作）
+  final ValueNotifier<bool> busy = ValueNotifier<bool>(false);
 
   Uint8List? _masterPcmBytes; // s16le mono（給電平/分析）
   int? _masterSampleRate;
+  // 延遲混音：只在播放/匯出時才重建 master
+  bool _masterDirty = true;
 
   // UI notifiers
   final ValueNotifier<bool> playing = ValueNotifier(false);
@@ -89,6 +92,10 @@ class MainEditorService extends ChangeNotifier {
 
   // ===== 參考常數 =====
   static const int _kSampleRate = 48000; // 引擎內部採樣率
+  // 磁吸門檻上下限（毫秒）與黏滯性
+  static const int _snapThrMinMs = 3;
+  static const int _snapThrMaxMs = 250;
+  static const double _snapReleaseFactor = 1.5; // 釋放黏滯所需倍率
 
   // ===== 軌道增益（dB 與 0..1 的互轉）=====
   static const double _gainDbMin = -60.0;
@@ -176,6 +183,7 @@ class MainEditorService extends ChangeNotifier {
     playing.dispose();
     playhead.dispose();
     meter.dispose();
+    busy.dispose();
     snapGuide.dispose();
     snapGuideOppositeMs.dispose(); // ★ 新增
     super.dispose();
@@ -183,7 +191,8 @@ class MainEditorService extends ChangeNotifier {
 
   // ===== 播放控制 =====
   Future<void> togglePlay() async {
-    if (!_pb.isLoaded) await _rebuildMasterAndLoad();
+    // 播放前確保 master 已與當前編輯同步
+    if (_masterDirty || !_pb.isLoaded) await _rebuildMasterAndLoad();
 
     if (_pb.isPlaying) {
       await _pb.pause();
@@ -309,42 +318,175 @@ class MainEditorService extends ChangeNotifier {
   }
 
   Future<void> importFromPath(String path) async {
+    busy.value = true;
     final st = SingleTrackService(
       decoder: _decoder,
       onChanged: _onTrackChanged,
     );
-    final sourceId = await st.decodeAndCache(path);
-    final decoded = st.getDecoded(sourceId)!;
+    try {
+      final sourceId = await st.decodeAndCache(path);
+      final decoded = st.getDecoded(sourceId)!;
 
-    st.addSegment(
-      sourceId: sourceId,
-      srcStartMs: 0,
-      srcEndMs: decoded.durationMs,
-      dstOffsetMs: 0,
-    );
-    st.rebuildRenderedNow();
-    st.buildDownsampledWaveform(step: 128);
+      st.addSegment(
+        sourceId: sourceId,
+        srcStartMs: 0,
+        srcEndMs: decoded.durationMs,
+        dstOffsetMs: 0,
+      );
+      st.rebuildRenderedNow();
+      st.buildDownsampledWaveform(step: 128);
 
-    tracks.add(st);
-    await _rebuildMasterAndLoad();
-    _pullSampleWindow();
-    notifyListeners();
+      tracks.add(st);
+      // 先刷新 UI；master 混音延後到播放/匯出
+      _masterDirty = true;
+      notifyListeners();
+    } finally {
+      busy.value = false;
+    }
   }
 
   void removeTrackAt(int index) {
     if (index < 0 || index >= tracks.length) return;
     final t = tracks.removeAt(index);
     t.dispose();
-    _rebuildMasterAndLoad();
-    _pullSampleWindow();
+    _masterDirty = true;
     notifyListeners();
+  }
+
+  /// 將第 index 軌以 FFmpeg 中置相消分離，新增兩條軌：
+  /// - 樂器(伴奏)：L-R / R-L（理想上消去中置）
+  /// - 人聲(中心)：mid-only（保留中置）
+  Future<void> separateVocalInstrument(int index) async {
+    if (index < 0 || index >= tracks.length) return;
+    final srcTrack = tracks[index];
+    // 取得此軌來源檔（僅支援單一來源的常見情境）
+    // 若多段多檔，先要求使用者合併；這裡取第一段來源作示範。
+    if (srcTrack.track.segments.isEmpty) return;
+    final firstSeg = srcTrack.track.segments.first;
+    final srcId = firstSeg.sourceId;
+    final decoded = srcTrack.getDecoded(srcId);
+    if (decoded == null) return; // 需要有來源檔
+
+    // 準備臨時輸出檔
+    final tmpDir = await getTemporaryDirectory();
+    final base = DateTime.now().microsecondsSinceEpoch;
+    final pathVox = p.join(tmpDir.path, 'vox_$base.wav');
+    final pathInst = p.join(tmpDir.path, 'inst_$base.wav');
+
+    // 使用 FFmpeg：
+    // 伴奏（去中）：pan=stereo|c0=c0-c1|c1=c1-c0
+    // 人聲（中心）：只取中置 (lowpass 可選) → aeval 合成 mid = (L+R)/2 到雙聲道
+    final String srcPath = srcId; // 我們用 sourceId 當路徑（本專案如此）
+
+    // 重要：下游統一 mono，避免 downmix 抵銷；加上左右增益補償：c0 - a*c1
+    final double a = await _estimateLRGainRatio(srcPath, seconds: 8);
+    // 伴奏：L - a*R → 高通(200Hz) → 輕微 3.2kHz notch → 限幅
+    final cmdInst =
+        '-y -i ${_q(srcPath)} -af "pan=mono|c0=c0-${a.toStringAsFixed(6)}*c1,highpass=f=200,equalizer=f=3200:t=q:w=1.0:g=-1.5,alimiter=limit=0.95" -ar 48000 -ac 1 ${_q(pathInst)}';
+    // 人聲：(L+R)/2 → 高通(90Hz) → 輕壓縮 2:1 → 限幅
+    final cmdVox =
+        '-y -i ${_q(srcPath)} -af "pan=mono|c0=(c0+c1)/2,highpass=f=90,acompressor=ratio=2:attack=10:release=120:makeup=0.0,alimiter=limit=0.95" -ar 48000 -ac 1 ${_q(pathVox)}';
+
+    busy.value = true;
+    try {
+      await FFmpegKit.execute(cmdInst);
+      await FFmpegKit.execute(cmdVox);
+
+      // 新增兩條軌道，保留原本每段的起訖與目的時間
+      Future<SingleTrackService> addFromPath(
+        String path,
+        String displayName,
+      ) async {
+        final st = SingleTrackService(
+          decoder: _decoder,
+          onChanged: _onTrackChanged,
+        );
+        final sourceId = await st.decodeAndCache(path);
+        st.track.displayName = displayName;
+        // 將來源軌的每個 segment 映射到新來源
+        for (final seg in srcTrack.track.segments) {
+          st.addSegment(
+            sourceId: sourceId,
+            srcStartMs: seg.srcStartMs,
+            srcEndMs: seg.srcEndMs,
+            dstOffsetMs: seg.dstOffsetMs,
+            fadeInMs: seg.fadeInMs,
+            fadeOutMs: seg.fadeOutMs,
+          );
+        }
+        st.rebuildRenderedNow();
+        st.buildDownsampledWaveform(step: 128);
+        // 預熱多層封包，保證 UI 立即有波形
+        await st.prewarmEnvelopes();
+        tracks.add(st);
+        return st;
+      }
+
+      await addFromPath(pathInst, '${srcTrack.name}-伴奏');
+      await addFromPath(pathVox, '${srcTrack.name}-人聲');
+
+      _masterDirty = true;
+      notifyListeners();
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  String _q(String s) => '"' + s.replaceAll('"', '\\"') + '"';
+
+  // 估計左右聲道的 RMS 比例 a（取開頭 seconds 秒），避免 L-R 殘留主唱
+  Future<double> _estimateLRGainRatio(String srcPath, {int seconds = 8}) async {
+    try {
+      final tmpDir = await getTemporaryDirectory();
+      final base = DateTime.now().microsecondsSinceEpoch;
+      final raw = p.join(tmpDir.path, 'lr_$base.s16le');
+      // 抽取前 seconds 秒為 s16le 立體聲，48k
+      final cmd =
+          '-y -t $seconds -i ${_q(srcPath)} -vn -ac 2 -ar 48000 -f s16le -acodec pcm_s16le ${_q(raw)}';
+      final session = await FFmpegKit.execute(cmd);
+      final rc = await session.getReturnCode();
+      if (!ReturnCode.isSuccess(rc)) return 1.0;
+      final f = File(raw);
+      if (!await f.exists()) return 1.0;
+      final bytes = await f.readAsBytes();
+      // 清理檔案
+      unawaited(
+        Future(() async {
+          try {
+            await f.delete();
+          } catch (_) {}
+        }),
+      );
+      if (bytes.length < 4) return 1.0;
+
+      final bd = ByteData.sublistView(bytes);
+      final totalI16 = bytes.length ~/ 2;
+      if (totalI16 < 4) return 1.0;
+      final frames = totalI16 ~/ 2; // 立體聲 frame
+      double accL = 0.0, accR = 0.0;
+      for (int i = 0; i < frames; i++) {
+        final l = bd.getInt16(i * 4, Endian.little).toDouble();
+        final r = bd.getInt16(i * 4 + 2, Endian.little).toDouble();
+        accL += l * l;
+        accR += r * r;
+      }
+      final rmsL = math.sqrt(accL / frames).clamp(1e-6, 32768.0);
+      final rmsR = math.sqrt(accR / frames).clamp(1e-6, 32768.0);
+      var ratio = (rmsL / rmsR);
+      if (!ratio.isFinite) ratio = 1.0;
+      // 限制範圍，避免極端值
+      ratio = ratio.clamp(0.25, 4.0);
+      return ratio;
+    } catch (_) {
+      return 1.0;
+    }
   }
 
   void reorderTracks(int oldIndex, int newIndex) {
     if (newIndex > oldIndex) newIndex -= 1;
     final t = tracks.removeAt(oldIndex);
     tracks.insert(newIndex, t);
-    _rebuildMasterAndLoad();
+    _masterDirty = true;
     notifyListeners();
   }
 
@@ -407,10 +549,12 @@ class MainEditorService extends ChangeNotifier {
       debugPrint('Playback load failed: $e');
       rethrow;
     }
+    // 已同步
+    _masterDirty = false;
 
     // 還原播放位置（夾在新時長範圍內）
     final newDurMs = _pb.durationMs;
-    final targetMs = (keepPosMs.clamp(0, newDurMs)) as int;
+    final targetMs = keepPosMs.clamp(0, newDurMs);
     await _pb.seekTo(targetMs);
     playhead.value = _pb.positionMs;
 
@@ -435,7 +579,11 @@ class MainEditorService extends ChangeNotifier {
 
   // 對外 API
   Future<void> seekTo(int ms) async {
-    if (!_pb.isLoaded) await _rebuildMasterAndLoad();
+    // 不在播放狀態且尚未混音：僅移動 UI 播放頭，不觸發混音
+    if (!_pb.isLoaded) {
+      playhead.value = ms;
+      return;
+    }
     await _pb.seekTo(ms);
     playhead.value = _pb.positionMs;
     _pullSampleWindow();
@@ -449,16 +597,20 @@ class MainEditorService extends ChangeNotifier {
 
   // ===== 內部：節流重建 =====
   void _scheduleRebuild([Duration delay = const Duration(milliseconds: 120)]) {
-    if (_interactiveEditing) return; // 拖曳互動期間不重建
-    _rebuildDebounce?.cancel();
-    _rebuildDebounce = Timer(delay, () async {
-      await rebuildMaster();
-    });
+    // 改為僅標記 master 髒污，不主動混音
+    if (_interactiveEditing) return; // 拖曳互動期間不動
+    _masterDirty = true;
+  }
+
+  // 對外：排程一次重建/混音，用於「載入、刪除、換位、切片後」等情境，避免每步都同步混音造成卡頓。
+  void scheduleRebuild({Duration delay = const Duration(milliseconds: 180)}) {
+    _scheduleRebuild(delay);
   }
 
   void _onTrackChanged() {
     if (_interactiveEditing) return; // 拖曳中只動 UI
-    _scheduleRebuild();
+    // 任一軌有變更 → 標記 master 髒污（不即時混音）
+    _masterDirty = true;
   }
 
   // --------------------------------------------------------------------------
@@ -469,6 +621,103 @@ class MainEditorService extends ChangeNotifier {
 
   bool _interactiveEditing = false;
   final Set<SingleTrackService> _touchedTracks = {};
+  // 邊緣快取（拖曳期間使用）
+  List<_SnapEdge> _edgeCache = const [];
+  // 黏滯性：保持已吸附的端點（'start' / 'end'）與接縫位置
+  String? _buttLatchSide;
+  int? _buttLatchJoinMs;
+
+  // 輕量設定導引線，避免重複 set 造成多餘 rebuild
+  void _setGuides(SnapPoint? main, int? oppositeMs) {
+    final curMain = snapGuide.value;
+    final sameMain =
+        (main == null && curMain == null) ||
+        (main != null &&
+            curMain != null &&
+            curMain.ms == main.ms &&
+            curMain.tag == main.tag);
+    if (!sameMain) snapGuide.value = main;
+
+    if (snapGuideOppositeMs.value != oppositeMs) {
+      snapGuideOppositeMs.value = oppositeMs;
+    }
+  }
+
+  void _buildEdgeCache() {
+    final edges = <_SnapEdge>[];
+    for (final t in tracks) {
+      for (final s in t.track.segments) {
+        final start = s.dstOffsetMs;
+        final end = start + s.srcDurationMs;
+        edges.add(_SnapEdge(ms: start, tag: 'clip-start', segId: s.id));
+        edges.add(_SnapEdge(ms: end, tag: 'clip-end', segId: s.id));
+      }
+    }
+    edges.sort((a, b) => a.ms.compareTo(b.ms));
+    _edgeCache = edges;
+  }
+
+  int? _nearestEdgeMsBinary(
+    int targetMs, {
+    String? excludeId,
+    Set<String>? allowedTags,
+    required int thrMs,
+  }) {
+    final list = _edgeCache;
+    if (list.isEmpty) return null;
+
+    // 二分尋找插入點
+    int lo = 0, hi = list.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >> 1;
+      if (list[mid].ms < targetMs) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+
+    int bestDelta = 1 << 30;
+    int? bestMs;
+    void tryIndex(int idx) {
+      if (idx < 0 || idx >= list.length) return;
+      final e = list[idx];
+      if (excludeId != null && e.segId == excludeId) return;
+      if (allowedTags != null && !allowedTags.contains(e.tag)) return;
+      final d = (e.ms - targetMs).abs();
+      if (d <= thrMs && d < bestDelta) {
+        bestDelta = d;
+        bestMs = e.ms;
+      }
+    }
+
+    int l = lo - 1, r = lo;
+    while (true) {
+      bool did = false;
+      if (l >= 0) {
+        final d = targetMs - list[l].ms;
+        if (d <= thrMs) {
+          tryIndex(l);
+          did = true;
+          l--;
+        } else {
+          l = -1;
+        }
+      }
+      if (r < list.length) {
+        final d = list[r].ms - targetMs;
+        if (d <= thrMs) {
+          tryIndex(r);
+          did = true;
+          r++;
+        } else {
+          r = list.length;
+        }
+      }
+      if (!did) break;
+    }
+    return bestMs;
+  }
 
   void beginInteractiveEdit() {
     if (_interactiveEditing) return;
@@ -477,6 +726,9 @@ class MainEditorService extends ChangeNotifier {
     snap.beginDrag();
     snapGuide.value = null;
     snapGuideOppositeMs.value = null; // ★ 新增
+    _buildEdgeCache();
+    _buttLatchSide = null;
+    _buttLatchJoinMs = null;
   }
 
   /// 拖曳過程：更新該段的目的時間，但【不重建混音】
@@ -488,45 +740,34 @@ class MainEditorService extends ChangeNotifier {
     required int rawMs,
     required bool snappingEnabled,
     required double pxPerMs,
+    required int laneMs,
     String? excludeId,
   }) {
     final firstTouch = _touchedTracks.add(track);
     if (firstTouch) track.setRenderSuspended(true);
 
-    // 門檻用像素感知
+    // 門檻用像素感知 + 上下限防護
     final desiredPx = 12.0;
-    final thrMs = (desiredPx / pxPerMs).round().clamp(1, 1 << 30);
+    final thrCalc = (desiredPx / pxPerMs).round();
+    final thrMs = thrCalc.clamp(_snapThrMinMs, _snapThrMaxMs);
     if (snap.config.thresholdMs != thrMs) {
       snap.config = snap.config.copyWith(thresholdMs: thrMs);
     }
 
     final dur = segment.srcDurationMs;
+    // 原本用 laneMs 限制最大起點；改為允許超出時限，僅保證 >= 0
 
-    // ---------- 1) 只看「片段邊緣」的候選（跨所有音軌），優先判斷 butt ----------
-    int? nearestClipMs(int targetMs) {
-      int bestDelta = 1 << 30;
-      int? bestMs;
-      for (final p in _collectClipEdgePoints(excludeId: excludeId)) {
-        // 只收 clip-start / clip-end
-        if (p.tag != 'clip-start' && p.tag != 'clip-end') continue;
-        final d = (p.ms - targetMs).abs();
-        if (d < bestDelta) {
-          bestDelta = d;
-          bestMs = p.ms;
-        }
-      }
-      return (bestDelta <= thrMs) ? bestMs : null;
-    }
+    // ---------- 1) 只看「片段邊緣」的候選（跨所有音軌），優先判斷 butt（用快取） ----------
+    int? nearestByCache(int targetMs) => _nearestEdgeMsBinary(
+      targetMs,
+      excludeId: excludeId,
+      allowedTags: const {'clip-start', 'clip-end'},
+      thrMs: thrMs,
+    );
 
-    // 左端（起點）對別人的邊
-    final startJoinMs = snappingEnabled && snapEnabled.value
-        ? nearestClipMs(rawMs)
-        : null;
-
-    // 右端（rawMs + dur）對別人的邊
-    final endJoinMs = snappingEnabled && snapEnabled.value
-        ? nearestClipMs(rawMs + dur)
-        : null;
+    final allowSnap = snappingEnabled && snapEnabled.value;
+    final startJoinMs = allowSnap ? nearestByCache(rawMs) : null;
+    final endJoinMs = allowSnap ? nearestByCache(rawMs + dur) : null;
 
     int dst = rawMs;
 
@@ -539,16 +780,73 @@ class MainEditorService extends ChangeNotifier {
           ? (endJoinMs - (rawMs + dur)).abs()
           : 1 << 30;
 
-      if (dEnd <= dStart && endJoinMs != null) {
+      // 黏滯性判定：若已鎖定，優先使用既有端，除非偏差超過釋放門檻
+      final releaseThr = (thrMs * _snapReleaseFactor).round();
+      bool? latchPreferEnd;
+      if (_buttLatchSide != null && _buttLatchJoinMs != null) {
+        if (_buttLatchSide == 'end') {
+          final dev = (_buttLatchJoinMs! - (rawMs + dur)).abs();
+          if (dev <= releaseThr)
+            latchPreferEnd = true;
+          else
+            _buttLatchSide = null;
+        } else if (_buttLatchSide == 'start') {
+          final dev = (_buttLatchJoinMs! - rawMs).abs();
+          if (dev <= releaseThr)
+            latchPreferEnd = false;
+          else
+            _buttLatchSide = null;
+        }
+      }
+
+      final preferEnd = latchPreferEnd ?? (dEnd <= dStart && endJoinMs != null);
+      if (preferEnd) {
         // 右端貼到別人的邊：接縫=endJoinMs，起點=接縫-長度
-        final join = endJoinMs;
-        dst = (join - dur).clamp(0, durationMs);
-        snapGuide.value = SnapPoint(join, 'butt'); // 畫接縫線（跨軌也會畫）
+        final join = (_buttLatchSide == 'end' && _buttLatchJoinMs != null)
+            ? _buttLatchJoinMs!
+            : endJoinMs!;
+        final dstCandidate = join - dur;
+        final reachable = (dstCandidate >= 0);
+        if (reachable) {
+          dst = dstCandidate;
+          _setGuides(SnapPoint(join, 'butt'), dst); // 對側=左端
+          _buttLatchSide = 'end';
+          _buttLatchJoinMs = join;
+        } else {
+          // 到不了該接縫，改為一般吸附
+          final res = snap.snapMs(
+            rawMs,
+            excludeId: excludeId,
+            snappingEnabled: allowSnap,
+          );
+          dst = math.max(0, (res?.snappedMs ?? rawMs));
+          _setGuides(null, null);
+          _buttLatchSide = null;
+          _buttLatchJoinMs = null;
+        }
       } else {
         // 左端貼到別人的邊：接縫=startJoinMs，起點=接縫
-        final join = startJoinMs!;
-        dst = join.clamp(0, durationMs);
-        snapGuide.value = SnapPoint(join, 'butt');
+        final join = (_buttLatchSide == 'start' && _buttLatchJoinMs != null)
+            ? _buttLatchJoinMs!
+            : startJoinMs!;
+        final dstCandidate = join;
+        final reachable = (dstCandidate >= 0);
+        if (reachable) {
+          dst = dstCandidate;
+          _setGuides(SnapPoint(join, 'butt'), dst + dur); // 對側=右端
+          _buttLatchSide = 'start';
+          _buttLatchJoinMs = join;
+        } else {
+          final res = snap.snapMs(
+            rawMs,
+            excludeId: excludeId,
+            snappingEnabled: allowSnap,
+          );
+          dst = math.max(0, (res?.snappedMs ?? rawMs));
+          _setGuides(null, null);
+          _buttLatchSide = null;
+          _buttLatchJoinMs = null;
+        }
       }
     } else {
       // ---------- 2) 完全沒 butt 命中 → 退回一般吸附（網格/播放頭/片段邊），不畫線 ----------
@@ -557,12 +855,10 @@ class MainEditorService extends ChangeNotifier {
         excludeId: excludeId,
         snappingEnabled: snappingEnabled && snapEnabled.value,
       );
-      if (res != null) {
-        dst = res.snappedMs;
-      } else {
-        dst = rawMs;
-      }
-      snapGuide.value = null;
+      dst = math.max(0, (res?.snappedMs ?? rawMs));
+      _setGuides(null, null);
+      _buttLatchSide = null;
+      _buttLatchJoinMs = null;
     }
 
     // 快移（不重建混音）
@@ -584,18 +880,22 @@ class MainEditorService extends ChangeNotifier {
       t.buildDownsampledWaveform(step: 128);
     }
 
-    // 重建 master，保留原播放狀態/位置
-    await _rebuildMasterAndLoad();
+    // 不即時混音：延到播放/匯出時
+    _masterDirty = true;
 
     // 如指定，跳到新的位置（例：段落新起點）
+    // 改為僅更新 UI 播放頭（不觸發 seek/mix）
     if (postSeekMs != null) {
-      final ms = (postSeekMs.clamp(0, durationMs)) as int;
-      await seekTo(ms);
+      final ms = postSeekMs.clamp(0, math.max(timelineTotalMs, 0));
+      playhead.value = ms.toInt();
     }
 
     snap.endDrag();
     snapGuide.value = null;
     snapGuideOppositeMs.value = null; // ★ 新增
+    _edgeCache = const [];
+    _buttLatchSide = null;
+    _buttLatchJoinMs = null;
   }
 
   // 收集可磁吸的片段邊緣
@@ -654,7 +954,7 @@ class MainEditorService extends ChangeNotifier {
     int bitrateKbps = 192,
     String? suggestFileName,
   }) async {
-    // 確保 master 重新混音到最新
+    // 確保 master 重新混音到最新（匯出時強制重建）
     await _rebuildMasterAndLoad();
     if (_masterPcmBytes == null || _masterSampleRate == null) {
       throw StateError('沒有可匯出的混音內容。');
@@ -778,11 +1078,7 @@ class MainEditorService extends ChangeNotifier {
     }
   }
 
-  // 小工具：join
-  String _pJoin(String a, String b) {
-    if (a.endsWith(Platform.pathSeparator)) return '$a$b';
-    return '$a${Platform.pathSeparator}$b';
-  }
+  // （移除未使用的 _pJoin）
 
   static const _mediaCh = MethodChannel('clipnote/media');
 
@@ -813,19 +1109,12 @@ class MainEditorService extends ChangeNotifier {
     );
   }
 
-  // ★ 取「某毫秒」附近最近的片段邊緣（不含自己）
-  SnapPoint? _nearestClipEdgeAround(int ms, {String? excludeId}) {
-    final pts = _collectClipEdgePoints(excludeId: excludeId);
-    if (pts.isEmpty) return null;
-    SnapPoint? best;
-    var bestD = 1 << 30;
-    for (final p in pts) {
-      final d = (p.ms - ms).abs();
-      if (d < bestD) {
-        best = p;
-        bestD = d;
-      }
-    }
-    return best;
-  }
+  // （移除未使用的 _nearestClipEdgeAround）
+}
+
+class _SnapEdge {
+  final int ms;
+  final String tag; // 'clip-start' / 'clip-end'
+  final String segId;
+  const _SnapEdge({required this.ms, required this.tag, required this.segId});
 }
